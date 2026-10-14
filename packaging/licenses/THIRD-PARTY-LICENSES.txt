@@ -1,0 +1,45 @@
+Third-party material used by the launcher and the application icon. The video core, loader and runtime references are
+listed in docs/REFERENCES.md and gpu/VENDOR.txt.
+
+
+========================================================================
+TRG Launcher 1.1.0
+========================================================================
+
+Source: https://github.com/TekRantGaming/trg-launcher
+Pinned revision: b384a28c712c9320eea8f9d50639dec49981b6c1 (gpu/deps.txt; fetched by tools\build.ps1, not stored here)
+
+The referenced revision does not include an explicit license file.
+
+
+========================================================================
+Dear ImGui 1.92.9b
+========================================================================
+
+Source: https://github.com/ocornut/imgui (pinned in gpu/deps.txt)
+License: MIT
+Compiled into the video core; the launcher uses the same copy with its SDL3 and SDL_Renderer backends.
+
+
+========================================================================
+SMAA 1x (Subpixel Morphological Anti-Aliasing)
+========================================================================
+
+Source: https://github.com/iryoku/smaa (Jimenez et al.), taken from the tlg_pc port.
+License: MIT, in gpu/shadps4/video_core/host_shaders/smaa/LICENSE.txt
+Compiled into the video core (SMAA.hlsl, AreaTex.h, SearchTex.h).
+
+
+========================================================================
+Application icon: Game Console Ecommerce
+========================================================================
+
+Source: SVG Repo (www.svgrepo.com). The file's own header reads "Uploaded to: SVG Repo, www.svgrepo.com, Generator:
+SVG Repo Mixer Tools". The source file was named game-console-ecommerce-svgrepo-com.svg.
+Modified to use the launcher accent color and a lighter tint of it (shape unchanged): the fills rgb(25,144,167) and
+rgb(144,224,239) became #E0BB32 and #F2E3AA. packaging/icons/app-icon.svg is the only copy kept.
+The ICO and PNG icon files are renderings of the modified SVG (tools/make-app-icon.py).
+
+License: not established from the file. The sibling project geometry-wars-retro-evolved-2-recompiled records this
+icon as svgrepo.com/svg/425126, collection "Ecommerce Duotone Filled Icons", license CC0; that page could not be
+re-read when this entry was written (HTTP 429), so check the license on SVG Repo before a public release.

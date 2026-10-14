@@ -4,9 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <inttypes.h>
 #include "runtime.h"
 #include "dcpgpu.h"
+#include "dcp_launcher.h"
+#include "dcp_resolution.h"
+#include "runtime_log.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -30,6 +34,7 @@ typedef struct { uint64_t target, kind, value, addend; } Reloc;
 static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
+static const DcpResolution *render_resolution=&dcp_resolutions[0];
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -84,7 +89,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     runtime_report();
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
                         "Native libc initialization is incomplete; game entry has not run.");
-    fflush(NULL);
+    runtime_log_flush();
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
 #ifndef _WIN32
@@ -143,7 +148,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
     }
-    fflush(NULL);
+    runtime_log_flush();
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -317,6 +322,24 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
             address - segments[i].address <= segments[i].size - bytes) return 1;
     return 0;
 }
+static void default_env(const char *name, const char *value) {
+    if (getenv(name)) return;
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+/* What the video core needs for correct output: no temporal upscaler hooks, linear readbacks (black surfaces
+ * otherwise), PS4 VBlank at 60 Hz. The environment still overrides them. */
+static void apply_runtime_defaults(const char *user_dir) {
+    default_env("GOW3_UPSCALER", "none");
+    default_env("GOW3_READBACK_LINEAR", "1");
+    default_env("GOW3_VBLANK_HZ", "60");
+    char settings[4200];
+    snprintf(settings, sizeof(settings), "%s/dcp.ini", user_dir);
+    default_env("GOW3_CONFIG", settings);
+}
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
@@ -333,21 +356,47 @@ int main(int argc, char **argv) {
 #endif
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL;
-    for (int i = 2; i < argc; ++i) {
+    int skip_launcher = 0;
+    const char *boot=NULL, *content_profile=NULL, *app0=NULL, *user_dir=NULL, *logs_dir=NULL, *log_file=NULL;
+    int first_option = 1;
+    if (argc > 1 && strncmp(argv[1], "--", 2)) { boot = argv[1]; first_option = 2; }
+    for (int i = first_option; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
         else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
+        else if (!strcmp(argv[i], "--logs") && i+1<argc) logs_dir=argv[++i];
+        else if (!strcmp(argv[i], "--log") && i+1<argc) log_file=argv[++i];
+        else if (!strcmp(argv[i], "--dcp-skip-launcher")) skip_launcher = 1;
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
-        else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
+        else {
+            fprintf(stderr, "Unknown option: %s\nUsage: %s [boot.bin] [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--logs dir] [--log file] [--dcp-skip-launcher] [--timeout seconds]\n", argv[i], argv[0]);
+            return 1;
+        }
     }
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--timeout seconds]\n", argv[0]);
-        return 1;
+    static DcpPaths paths;
+    const DcpPathRequest request={boot,content_profile,app0,user_dir,logs_dir};
+    if (!dcp_resolve_paths(&request,&paths)) fail("cannot locate the game folders");
+    boot=paths.boot; content_profile=paths.content_profile; app0=paths.app0; user_dir=paths.user_dir;
+#ifdef _WIN32
+    char log_path[4200];
+    if (runtime_log_start(paths.logs_dir,log_file,log_path,sizeof(log_path))) {
+        time_t now=time(NULL);
+        char stamp[32];
+        strftime(stamp,sizeof(stamp),"%Y-%m-%dT%H:%M:%S",localtime(&now));
+        printf("[run] %s\n[run] %s\n[run] log %s\n[run] prepared root %s\n",stamp,GetCommandLineA(),log_path,app0);
+        atexit(runtime_log_flush);
+    } else fprintf(stderr,"Cannot create the log %s\n",log_file ? log_file : paths.logs_dir);
+#endif
+    apply_runtime_defaults(user_dir);
+    if (!cpu_only && !check_imports) {
+        DcpLauncherConfig launcher={app0,paths.image_dir,user_dir,getenv("GOW3_CONFIG"),paths.logs_dir,skip_launcher};
+        if (dcp_launcher_run(&launcher)==DCP_LAUNCHER_QUIT) exit(0);
     }
+    render_resolution=&dcp_resolutions[dcp_render_resolution(getenv("GOW3_CONFIG"))];
+    runtime_dcp_set_neo_mode(render_resolution->pro_memory);
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
         unsigned char data[28];
@@ -394,7 +443,7 @@ int main(int argc, char **argv) {
     sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
     alarm(timeout_seconds); /* 0 disables the watchdog */
 #endif
-    FILE *f = fopen(argv[1], "rb");
+    FILE *f = fopen(boot, "rb");
     if (!f) fail("cannot open boot file; run tools/prepare-game.ps1 first");
     char magic[8];
     if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "DCPBOOT1", 8)) fail("bad boot file signature");
@@ -539,9 +588,15 @@ int main(int argc, char **argv) {
             ++missing;
         }
         printf("Imports: %" PRIu64 " missing\n",missing);
-        fflush(NULL);
+        runtime_log_flush();
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
+    if (render_resolution!=&dcp_resolutions[0]) {
+        char error[160];
+        if (!dcp_apply_resolution(image,size,render_resolution,error,sizeof(error))) fail(error);
+    }
+    printf("DCP: render resolution %dx%d (%s)%s\n",render_resolution->width,render_resolution->height,render_resolution->key,
+           render_resolution->pro_memory ? ", PS4 Pro memory path" : "");
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

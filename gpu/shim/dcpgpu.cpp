@@ -46,6 +46,8 @@ uint64_t runtime_process_time_counter(void);
 uint64_t runtime_tsc_frequency(void);
 int32_t* runtime_errno(void);
 void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
+// runtime_log.c
+void runtime_log_flush(void);
 }
 
 Frontend::WindowSDL* g_window = nullptr;
@@ -217,7 +219,7 @@ extern "C" int dcpgpu_init(const DcpGpuConfig* config) {
             SDL_Delay(2);
         }
         LOG_INFO(Frontend, "Window closed by user");
-        std::fflush(stdout);
+        runtime_log_flush();
         std::_Exit(0);
     });
     g_window_thread.detach();

@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+#include "gow3_settings.h"
 #include "gow3_threads.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -1567,6 +1568,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         return false;
     }
 
+    pipeline_is_compute = pipeline->IsCompute();
     set_write_index = 0;
     set_writes.clear();
     buffer_infos.clear();
@@ -2532,12 +2534,33 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     BindSamplers(stage, prepared, binding, write_index);
 }
 
+void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+    const int forced = Gow3Settings::Get().anisotropy;
+    if (forced <= 1 || is_depth || pipeline_is_compute || sharp.mip_filter == AmdGpu::MipFilter::None ||
+        (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
+         sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear)) {
+        return;
+    }
+    const auto ratio = forced >= 16 ? AmdGpu::AnisoRatio::Sixteen
+        : forced >= 8 ? AmdGpu::AnisoRatio::Eight
+        : forced >= 4 ? AmdGpu::AnisoRatio::Four : AmdGpu::AnisoRatio::Two;
+    if (AmdGpu::IsAnisoFilter(sharp.xy_min_filter) && sharp.MaxAniso() >= forced) {
+        return;
+    }
+    sharp.xy_min_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    if (sharp.xy_mag_filter == AmdGpu::Filter::Bilinear) {
+        sharp.xy_mag_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    }
+    sharp.max_aniso.Assign(ratio);
+}
+
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index) {
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        ForceAnisotropy(ssharp, sampler.is_depth);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);

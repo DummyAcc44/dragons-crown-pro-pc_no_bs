@@ -42,6 +42,7 @@ void runtime_fiber_report(void);
 uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
 uintptr_t runtime_dcp_resolve(const char *name);
+void runtime_dcp_set_neo_mode(int on);
 uintptr_t runtime_font_resolve(const char *name);
 uintptr_t runtime_eventflag_resolve(const char *name);
 uintptr_t runtime_pad_resolve(const char *name);

@@ -7,14 +7,14 @@
   the CMake configuration. The one build configuration, RelWithDebInfo (-O2 -g -DNDEBUG), is what is tested
   and what a package must contain; nothing else is built.
 .PARAMETER Run
-  Launches the loader that was just built and stays attached until the game is closed. Logs to
-  build\logs\dragons_crown_pro_NNN.log.
+  Launches the loader that was just built and stays attached until the game is closed. The launcher opens first
+  when its rules say so (docs\LAUNCHER.md). Logs to build\logs\dragons_crown_pro_NNN.log.
 .PARAMETER Clean
   Deletes build\cmake first (the prepared game, the boot image and the logs are kept).
 .PARAMETER CheckImports
   Diagnostic: with -Run, lists the PS4 imports the runtime lacks instead of running the game.
 .PARAMETER TimeoutSeconds
-  Diagnostic for automated tests only: with -Run, kills the loader after this many seconds.
+  Diagnostic for automated tests only: with -Run, kills the loader after this many seconds (and skips the launcher).
 .PARAMETER LoaderArgs
   Extra arguments for dcp-loader.exe (with -Run).
 .EXAMPLE

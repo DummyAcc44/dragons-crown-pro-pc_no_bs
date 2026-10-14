@@ -718,9 +718,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     // gow3: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
     // until its slot; slots advance by one period (no drift) but never lag behind by more.
-    // gow3: the in-game menu changes the limit live (Gow3Settings::fps_limit); GOW3_FPS_LIMIT
-    // and the uncapped presets keep their fixed limit.
-    const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
+    const bool fixed_limit = EmulatorSettings.GetVblankFrequency() == 480;
     const auto current_limit = [&] {
         return fixed_limit ? EmulatorSettings.GetFrameLimit() : u32(Gow3Settings::Get().fps_limit.load());
     };

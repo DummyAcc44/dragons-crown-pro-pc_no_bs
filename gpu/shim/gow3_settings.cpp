@@ -3,11 +3,16 @@
 #include "gow3_graphics.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace Gow3Settings {
 
@@ -20,6 +25,101 @@ const char* Path() {
 
 float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
+}
+
+std::string Trim(const std::string& text) {
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    return first == std::string::npos ? std::string{} : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+std::mutex file_mutex; // the menu (present thread) and F11 (window thread) both write
+
+using Entries = std::vector<std::pair<std::string, std::string>>;
+
+// Sets each key of `entries` in the file: its line is rewritten in place, a missing one is appended, and every
+// other line (the launcher's keys, comments) is kept as it is. `header` starts a file that does not exist yet.
+bool WriteEntries(const Entries& entries, const char* header) {
+    std::scoped_lock lock{file_mutex};
+    std::vector<std::string> lines;
+    if (FILE* in = std::fopen(Path(), "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof(line), in)) {
+            lines.push_back(Trim(line));
+        }
+        std::fclose(in);
+    } else if (header) {
+        lines.push_back(header);
+    }
+    std::vector<bool> written(entries.size(), false);
+    for (std::string& line : lines) {
+        const auto eq = line.find('=');
+        if (line.empty() || line[0] == '#' || eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(line.substr(0, eq));
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].first == key) {
+                line = key + "=" + entries[i].second;
+                written[i] = true;
+            }
+        }
+    }
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (!written[i]) {
+            lines.push_back(entries[i].first + "=" + entries[i].second);
+        }
+    }
+    const std::filesystem::path path{Path()};
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    const std::string temporary = std::string(Path()) + ".tmp";
+    FILE* out = std::fopen(temporary.c_str(), "w");
+    if (!out) {
+        std::printf("Settings: cannot write %s\n", Path());
+        return false;
+    }
+    for (const std::string& line : lines) {
+        std::fprintf(out, "%s\n", line.c_str());
+    }
+    std::fclose(out);
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::printf("Settings: cannot replace %s: %s\n", Path(), ec.message().c_str());
+        return false;
+    }
+    return true;
+}
+
+// The "key=value" lines of formatted text (comments skipped).
+Entries ParseEntries(const std::string& text) {
+    Entries entries;
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) {
+            end = text.size();
+        }
+        const std::string line = text.substr(start, end - start);
+        const auto eq = line.find('=');
+        if (!line.empty() && line[0] != '#' && eq != std::string::npos) {
+            entries.emplace_back(line.substr(0, eq), line.substr(eq + 1));
+        }
+        start = end + 1;
+    }
+    return entries;
+}
+
+constexpr char FileHeader[] = "# video core settings (in-game menu: Insert / R3+L2)";
+
+void Appendf(std::string& text, const char* format, ...) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    text += buffer;
 }
 
 void Set(Values& v, const std::string& key, const std::string& value) {
@@ -51,7 +151,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         return;
     }
     if (key == "menu_tab") {
-        v.menu_tab = i >= 0 && i <= 2 ? i : 0;
+        v.menu_tab = i >= 0 && i <= 1 ? i : 0;
         return;
     }
     if (key == "upscaler") {
@@ -86,18 +186,26 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.display_mode = Gow3Graphics::ParseDisplayMode(value);
     } else if (key == "vsync") {
         v.vsync = i != 0;
-    } else if (key == "fps_limit") {
-        v.fps_limit = Gow3Graphics::ParseFpsLimit(i);
-    } else if (key == "async_shaders") {
-        v.async_shaders = i != 0;
     } else if (key == "fsr1") {
         v.fsr1 = i != 0;
     } else if (key == "rcas") {
         v.rcas = i != 0;
+    } else if (key == "graphics_card") {
+        v.graphics_card = value == "automatic" ? std::string() : value;
+    } else if (key == "smaa") {
+        v.smaa = i != 0;
+    } else if (key == "anisotropy") {
+        v.anisotropy = Gow3Graphics::ParseAnisotropy(i);
     } else if (key == "rcas_strength") {
         v.rcas_strength = Gow3Graphics::ParseRcasStrength(value.empty() ? -1 : i);
-    } else if (key == "frames_queued") {
-        v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
+    } else if (key == "window_width") {
+        v.requested_width = std::clamp(i, 0, 16384);
+    } else if (key == "window_height") {
+        v.requested_height = std::clamp(i, 0, 16384);
+    } else if (key == "monitor") {
+        v.monitor = std::max(i, 1);
+    } else if (key == "show_fps_title") {
+        v.show_fps_title = i != 0;
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -141,10 +249,16 @@ void Load() {
             if (text.empty() || text[0] == '#' || eq == std::string::npos) {
                 continue;
             }
-            Set(v, text.substr(0, eq), text.substr(eq + 1));
+            Set(v, Trim(text.substr(0, eq)), Trim(text.substr(eq + 1)));
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
+        if (v.smaa) {
+            std::printf("GPU: anti-aliasing SMAA\n");
+        }
+        if (v.anisotropy) {
+            std::printf("GPU: texture filtering %dx\n", v.anisotropy.load());
+        }
     }
     // Environment overrides (scripts, A/B tests).
     if (const char* env = std::getenv("GOW3_UPSCALER")) {
@@ -158,9 +272,9 @@ void Load() {
         {"GOW3_REACTIVE", "reactive"},              {"GOW3_REACTIVE_SCALE", "reactive_scale"},
         {"GOW3_REACTIVE_THRESHOLD", "reactive_threshold"}, {"GOW3_REACTIVE_MAX", "reactive_max"},
         {"GOW3_UPSCALE_PRESET", "preset"},            {"GOW3_OBJECT_MOTION", "object_motion"},
-        {"GOW3_ASYNC_SHADERS", "async_shaders"},      {"GOW3_DEFERRED_READBACK", "deferred_readback"},
+        {"GOW3_DEFERRED_READBACK", "deferred_readback"},
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
-        {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
+        {"GOW3_RCAS", "rcas"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -235,46 +349,46 @@ bool ResolutionNeedsRestart() {
 
 void Save() {
     const auto& v = Get();
-    FILE* file = std::fopen(Path(), "w");
-    if (!file) {
-        std::printf("Settings: cannot write %s\n", Path());
-        return;
-    }
-    std::fprintf(file,
-                 "# video core settings (in-game menu: Insert / R3+L2)\n"
-                 "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
-                 "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
-                 "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
-                 UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
-                 v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
-                 int(v.object_motion.load()),
-                 v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
-                 v.debug_view.load(), int(v.show_fps.load()),
-                 int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
-    std::fprintf(file, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
-    std::fprintf(file,
-                 "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"
-                 "overlay_cpu=%d\noverlay_ram=%d\noverlay_vram=%d\noverlay_scale=%d\noverlay_corner=%d\n"
-                 "overlay_opacity=%d\noverlay_layout=%d\nmenu_tab=%d\n",
-                 int(v.overlay_items >> 0 & 1), int(v.overlay_items >> 1 & 1), int(v.overlay_items >> 2 & 1),
-                 int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
-                 int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
-                 v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load());
-    std::fprintf(file,
-                 "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
-                 "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
-                 "render_resolution=%s\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
-                 "restart_unconfirmed=%d\n",
-                 Gow3Graphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
-                 int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
-                 int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
-                 Gow3Graphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
-                 v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
-                 int(v.restart_unconfirmed.load()));
+    std::string text;
+    Appendf(text,
+            "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
+            "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
+            "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
+            UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
+            v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
+            int(v.object_motion.load()),
+            v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
+            v.debug_view.load(), int(v.show_fps.load()),
+            int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
+    Appendf(text, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
+    Appendf(text,
+            "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"
+            "overlay_cpu=%d\noverlay_ram=%d\noverlay_vram=%d\noverlay_scale=%d\noverlay_corner=%d\n"
+            "overlay_opacity=%d\noverlay_layout=%d\nmenu_tab=%d\n",
+            int(v.overlay_items >> 0 & 1), int(v.overlay_items >> 1 & 1), int(v.overlay_items >> 2 & 1),
+            int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
+            int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
+            v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load());
+    Appendf(text,
+            "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
+            "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
+            "render_resolution=%s\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
+            "restart_unconfirmed=%d\n",
+            Gow3Graphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
+            int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
+            int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
+            Gow3Graphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
+            v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
+            int(v.restart_unconfirmed.load()));
     // Read by run.sh at start.
-    std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
-                                                  : v.live_resolution ? "1" : "0");
-    std::fclose(file);
+    Appendf(text, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
+                                             : v.live_resolution ? "1" : "0");
+    WriteEntries(ParseEntries(text), FileHeader);
+}
+
+void SaveDisplayMode() {
+    WriteEntries({{"display_mode", std::string(Gow3Graphics::DisplayModeKeys[std::clamp(Get().display_mode.load(), 0, 2)])}},
+                 FileHeader);
 }
 
 float PresetScale(int preset) {

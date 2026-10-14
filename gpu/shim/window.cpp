@@ -1,9 +1,12 @@
 // gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <SDL3/SDL.h>
 #include "common/assert.h"
+#include "dcp_displays.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "gow3_overlay.h"
@@ -17,12 +20,23 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
+    // The launcher's Window size and Monitor settings; the same display list as its Monitor row.
+    const auto& settings = Gow3Settings::Get();
+    const std::vector<dcp::Display> displays = dcp::ListDisplays();
+    const dcp::Display* display = dcp::DisplayForSetting(displays, settings.monitor);
+    int window_width = settings.requested_width > 0 ? settings.requested_width.load() : width_;
+    int window_height = settings.requested_height > 0 ? settings.requested_height.load() : height_;
+    int window_x = SDL_WINDOWPOS_CENTERED, window_y = SDL_WINDOWPOS_CENTERED;
+    if (display) {
+        dcp::FitToDisplay(window_width, window_height, *display);
+        window_x = window_y = SDL_WINDOWPOS_CENTERED_DISPLAY(display->id);
+    }
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, window_x);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, window_y);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, window_width);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, window_height);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
     base_title = title;
@@ -67,6 +81,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     width = w;
     height = h;
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
+    const std::string display_name = display && !display->name.empty() ? " (" + display->name + ")" : "";
+    std::printf("Window: display %d of %zu%s, requested %dx%d, VSync %s, frame rate in title %s\n",
+                display ? int(display - displays.data()) + 1 : 0, displays.size(), display_name.c_str(),
+                window_width, window_height, settings.vsync ? "on" : "off", settings.show_fps_title ? "on" : "off");
 }
 
 // Windowed, borderless (desktop-sized, no mode change) or exclusive fullscreen at the desktop
@@ -106,10 +124,57 @@ int WindowSDL::PollTextInput(std::string& out) {
 }
 
 void WindowSDL::UpdateTextTitle() {
-    const std::string title = text_active ? base_title + " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)"
-                                          : base_title;
-    SDL_SetWindowTitle(window, title.c_str());
+    RefreshTitle();
     Gow3Overlay::SetTextEntry(text_active, text_prompt, text);
+}
+
+// Window thread. The title is the game's, then the text being typed, or the frame rate.
+void WindowSDL::RefreshTitle() {
+    std::string title = base_title;
+    if (text_active) {
+        title += " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)";
+    } else if (fps >= 0.0) {
+        char digits[32];
+        std::snprintf(digits, sizeof(digits), "%.2f", fps);
+        title += std::string(" | FPS: ") + digits;
+    }
+    if (title != title_shown) {
+        SDL_SetWindowTitle(window, title.c_str());
+        title_shown = title;
+    }
+}
+
+// The frame rate of the presented game frames, measured about once a second.
+void WindowSDL::UpdateFpsTitle() {
+    if (!Gow3Settings::Get().show_fps_title) {
+        if (fps >= 0.0) {
+            fps = -1.0;
+            RefreshTitle();
+        }
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (fps_started == std::chrono::steady_clock::time_point{}) {
+        fps_started = now;
+        fps_frames = Gow3Overlay::PresentedFrames();
+        return;
+    }
+    const double elapsed = std::chrono::duration<double>(now - fps_started).count();
+    if (elapsed < 1.0) {
+        return;
+    }
+    const u64 frames = Gow3Overlay::PresentedFrames();
+    fps = double(frames - fps_frames) / elapsed;
+    fps_started = now;
+    fps_frames = frames;
+    RefreshTitle();
+}
+
+// F11: Windowed and Borderless, saved as the Display mode like the launcher's row.
+void WindowSDL::ToggleBorderless() {
+    auto& mode = Gow3Settings::Get().display_mode;
+    mode = mode.load() == Gow3Graphics::Windowed ? Gow3Graphics::Borderless : Gow3Graphics::Windowed;
+    Gow3Settings::SaveDisplayMode();
 }
 
 bool WindowSDL::PollEvents() {
@@ -128,6 +193,7 @@ bool WindowSDL::PollEvents() {
     if (const int mode = Gow3Settings::Get().display_mode; mode != display_mode) {
         ApplyDisplayMode(mode);
     }
+    UpdateFpsTitle();
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
@@ -161,6 +227,11 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         switch (event.type) {
+        case SDL_EVENT_KEY_DOWN:
+            if (event.key.key == SDLK_F11 && !event.key.repeat) {
+                ToggleBorderless();
+            }
+            break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_RESIZED: {
             int w = 0, h = 0;

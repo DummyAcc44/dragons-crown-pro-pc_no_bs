@@ -15,8 +15,9 @@ static ABI int32_t libc_heap_trace_info(HeapTraceInfo *info) {
 
 static ABI int32_t ok_noop(void) { return 0; }
 
-/* Base PS4, not Pro. */
-static ABI int32_t is_neo_mode(void) { return 0; }
+static int32_t neo_mode;
+static ABI int32_t is_neo_mode(void) { return neo_mode; }
+void runtime_dcp_set_neo_mode(int on) { neo_mode = on != 0; }
 
 static const RuntimeExport exports[] = {
     {"sceKernelIsNeoMode", is_neo_mode},

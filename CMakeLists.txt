@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(dragons_crown_pro_pc LANGUAGES C CXX)
+set(DCP_PORT_VERSION "0.1.0-dev")
 
 if (NOT WIN32 OR NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "Build with MSYS2 CLANG64 (tools\build.ps1).")
@@ -16,6 +17,7 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(Freetype REQUIRED)
 
 add_subdirectory(gpu)
+add_subdirectory(launcher)
 
 set(DCP_RUNTIME_SOURCES
     src/runtime.c
@@ -27,6 +29,7 @@ set(DCP_RUNTIME_SOURCES
     src/runtime_file.c
     src/runtime_font.c
     src/runtime_kernel.c
+    src/runtime_log.c
     src/runtime_memory.c
     src/runtime_mutex.c
     src/runtime_pad.c
@@ -39,12 +42,15 @@ set(DCP_RUNTIME_SOURCES
     src/runtime_time.c)
 
 enable_language(RC)
+# Relink when the application icon or the manifest changes.
+set_source_files_properties(src/dcp-loader.rc PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_SOURCE_DIR}/packaging/icons/app-icon.ico;${CMAKE_SOURCE_DIR}/src/dcp-loader.manifest")
 add_executable(dcp-loader src/loader.c ${DCP_RUNTIME_SOURCES} src/compat_win.c src/dcp-loader.rc)
-target_include_directories(dcp-loader PRIVATE src)
+target_include_directories(dcp-loader PRIVATE src launcher)
 target_compile_options(dcp-loader PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror -fno-omit-frame-pointer>)
 # Windows 10 1903+ APIs (VirtualAlloc2, MapViewOfFile3).
 target_compile_definitions(dcp-loader PRIVATE _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000007)
 # The PS4 user range (64 GiB - 1 TiB) must stay free of host allocations: no high-entropy ASLR.
 # The guest main thread runs on the process stack: 16 MiB, committed (guest code has no stack probes).
 target_link_options(dcp-loader PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
-target_link_libraries(dcp-loader PRIVATE dcpgpu SDL3::SDL3 Freetype::Freetype onecore bcrypt ws2_32 -pthread)
+target_link_libraries(dcp-loader PRIVATE dcp_launcher dcpgpu SDL3::SDL3 Freetype::Freetype onecore bcrypt ws2_32 -pthread)

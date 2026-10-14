@@ -236,32 +236,14 @@ void SliderRow(const char* label, std::atomic<int>& value, int lo, int hi, const
     ImGui::PopID();
 }
 
-const char* UpscalerLabel(int upscaler) {
-    switch (upscaler) {
-    case Gow3Settings::UpscalerFsr3: return "FSR 3.1";
-    case Gow3Settings::UpscalerFsr4: return "FSR 4";
-    case Gow3Settings::UpscalerFsr411: return "FSR 4.1.1";
-    case Gow3Settings::UpscalerTaa: return "TAA";
-    case Gow3Settings::UpscalerDlss: return "DLSS";
-    default: return "";
-    }
-}
-
 const Vulkan::Instance* overlay_instance = nullptr; // for the overlay's measurements
 
-// The performance overlay's text with the current settings (also the menu's preview).
+// The corner counter's text (also the menu's preview).
 std::string OverlayText() {
-    namespace P = Gow3PerfStats;
-    const auto& s = Gow3Settings::Get();
-    const unsigned items = s.overlay_items;
-    if ((items & (P::Gpu | P::Cpu | P::Ram | P::Vram)) && overlay_instance) {
-        P::Start(*overlay_instance);
-    }
-    P::Sample sample = P::Latest();
-    sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
-    sample.frame_ms = frame_ms_avg;
-    sample.upscaler = UpscalerLabel(s.upscaler);
-    return P::Format(sample, items, s.overlay_layout == 0);
+    char text[64];
+    std::snprintf(text, sizeof(text), "%.0f FPS  %.1f ms", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
+                  frame_ms_avg);
+    return text;
 }
 
 void ImageTab() {
@@ -302,23 +284,6 @@ void ImageTab() {
         InfoRow("Window", text);
         InfoRow("FSR 1", !s.fsr1 ? "off" : upscaling ? "active" : "no effect (image not smaller than window)");
         InfoRow("Sharpening", s.rcas_applied ? "applied" : "not applied");
-        ImGui::EndTable();
-    }
-}
-
-void PerformanceTab() {
-    namespace G = Gow3Graphics;
-    auto& s = Gow3Settings::Get();
-    ImGui::SeparatorText("Live");
-    if (BeginRows("##live")) {
-        static const char* const fps_labels[] = {"30", "60", "120", "240", "Unlimited"};
-        ChoiceRow("Frame rate limit", s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
-                  "Caps the frame rate.");
-        static const char* const queued_labels[] = {"1 (lowest latency)", "2", "Unlimited"};
-        ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
-                  int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
-        CheckRow("Compile new shaders in the background", s.async_shaders,
-                 "Fewer stutters in new areas; an object or effect may appear a moment later.");
         ImGui::EndTable();
     }
 }
@@ -403,7 +368,7 @@ void Menu() {
         return;
     }
     footer_help = nullptr;
-    constexpr int TabCount = 3;
+    constexpr int TabCount = 2;
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput) {
         const int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
@@ -416,7 +381,7 @@ void Menu() {
     }
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
     if (ImGui::BeginTabBar("##tabs")) {
-        static const char* const tabs[TabCount] = {"Image", "Performance", "Overlay"};
+        static const char* const tabs[TabCount] = {"Image", "Overlay"};
         for (int tab = 0; tab < TabCount; ++tab) {
             const ImGuiTabItemFlags flags = requested_tab == tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (!ImGui::BeginTabItem(tabs[tab], nullptr, flags)) {
@@ -429,7 +394,6 @@ void Menu() {
             if (ImGui::BeginChild("##body", ImVec2(0, -footer))) {
                 switch (tab) {
                 case 0: ImageTab(); break;
-                case 1: PerformanceTab(); break;
                 default: OverlayTab(); break;
                 }
             }
@@ -563,25 +527,29 @@ void LoadingScreen() {
 
 void FpsCounter() {
     const auto& s = Gow3Settings::Get();
-    const std::string text = OverlayText();
-    if (text.empty()) {
+    if (frame_ms_avg <= 0.0f) {
         return;
     }
+    const std::string label = OverlayText();
+    const char* text = label.c_str();
+    constexpr ImU32 panel_color = IM_COL32(7, 10, 22, 190);
+    constexpr ImU32 border_color = IM_COL32(224, 187, 50, 255);
+    constexpr ImU32 text_color = IM_COL32(255, 255, 255, 255);
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float pad = 12.0f * base_scale;
+    ImFont* font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize() * s.overlay_scale / 100.0f;
+    const ImVec2 text_size = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    const ImVec2 pad(size * 0.6f, size * 0.3f);
+    const ImVec2 box(text_size.x + pad.x * 2, text_size.y + pad.y * 2);
     const int corner = s.overlay_corner;
     const bool right = corner == 1 || corner == 3, bottom = corner >= 2;
-    ImGui::SetNextWindowPos(ImVec2(right ? viewport->WorkPos.x + viewport->WorkSize.x - pad : viewport->WorkPos.x + pad,
-                                   bottom ? viewport->WorkPos.y + viewport->WorkSize.y - pad : viewport->WorkPos.y + pad),
-                            ImGuiCond_Always, ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
-    ImGui::SetNextWindowBgAlpha(s.overlay_opacity / 100.0f);
-    ImGui::Begin("##fps", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::SetWindowFontScale(s.overlay_scale / 100.0f);
-    ImGui::TextUnformatted(text.c_str());
-    ImGui::End();
+    const ImVec2 p0(right ? viewport->WorkPos.x + viewport->WorkSize.x - size - box.x : viewport->WorkPos.x + size,
+                    bottom ? viewport->WorkPos.y + viewport->WorkSize.y - size - box.y : viewport->WorkPos.y + size);
+    const ImVec2 p1(p0.x + box.x, p0.y + box.y);
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(p0, p1, panel_color, size * 0.5f);
+    draw->AddRect(p0, p1, border_color, size * 0.5f, 0, 1.0f);
+    draw->AddText(font, size, ImVec2(p0.x + pad.x, p0.y + pad.y), text_color, text);
 }
 
 void BackgroundLoading() {
@@ -977,7 +945,14 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
 }
 
 // GOW3_FPS_LOG=1: presented frames per second and the worst frame, every 5 s (benchmarks).
+std::atomic<u64> presented_frames{0};
+
+u64 PresentedFrames() {
+    return presented_frames.load(std::memory_order_relaxed);
+}
+
 void LogPresent() {
+    presented_frames.fetch_add(1, std::memory_order_relaxed);
     static const bool fps_log = std::getenv("GOW3_FPS_LOG") != nullptr;
     if (!fps_log) {
         return;

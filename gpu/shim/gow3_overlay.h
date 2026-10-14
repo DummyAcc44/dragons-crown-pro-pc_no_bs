@@ -36,8 +36,9 @@ void SetBackgroundLoading(u32 done, u32 total);
 /// Whether anything is drawn this frame (menu open or FPS counter on).
 bool Visible();
 
-/// Counts a presented frame for GOW3_FPS_LOG.
+/// Counts a presented game frame (the frame rate in the window title, GOW3_FPS_LOG).
 void LogPresent();
+u64 PresentedFrames();
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);

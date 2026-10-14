@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <utility>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -135,6 +138,10 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    static bool logged = false;
+    if (!std::exchange(logged, true)) {
+        std::printf("VideoOut: DEBUG_SAULO game display buffers %ux%u\n", attribute->width, attribute->height);
+    }
     return driver->RegisterBuffers(port, startIndex, addresses, bufferNum, attribute);
 }
 
@@ -291,6 +298,11 @@ s32 PS4_SYSV_ABI sceVideoOutGetResolutionStatus(s32 handle, SceVideoOutResolutio
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    static bool logged = false;
+    if (!std::exchange(logged, true)) {
+        std::printf("VideoOut: DEBUG_SAULO reported display resolution %ux%u\n", port->resolution.full_width,
+                    port->resolution.full_height);
+    }
     *status = port->resolution;
     return ORBIS_OK;
 }

@@ -256,6 +256,7 @@ private:
     bool BindResources(const Pipeline* pipeline);
     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                       Shader::Backend::Bindings& binding, u32& write_index);
+    void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
     /// gow3: a stage's resolved textures remembered by its prepared T# hashes
     /// (TextureSetMemo): a hit only redoes the per-draw effects (binding flags, transitions).
     struct TextureSetEntry {
@@ -307,6 +308,7 @@ private:
     void EmitIndexBuffer();
 
     void ResetBindings(bool is_compute);
+    bool pipeline_is_compute = false; ///< the pipeline of the current BindResources
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);

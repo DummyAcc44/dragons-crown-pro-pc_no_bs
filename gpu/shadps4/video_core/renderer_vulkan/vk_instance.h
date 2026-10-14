@@ -20,6 +20,9 @@ VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace Vulkan {
 
+/// The device meets the renderer's Vulkan version, extension and feature requirements.
+bool IsDeviceUsable(vk::PhysicalDevice physical);
+
 class Instance {
 public:
     explicit Instance(bool validation = false, bool crash_diagnostic = false);

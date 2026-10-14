@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace Gow3Settings {
 
@@ -52,12 +53,20 @@ struct Values {
     std::atomic<bool> fsr1{false};
     std::atomic<bool> rcas{true};
     std::atomic<int> rcas_strength{75};
+    std::atomic<bool> smaa{false};
+    std::string graphics_card; ///< exact Vulkan device name; empty: Automatic. Set by Load() only
+    std::atomic<int> anisotropy{0}; ///< 0: the game's own; 2, 4, 8 or 16 times
     /// Set by the presenter: sharpening ran on the last frame (it needs FSR 1 when the game's
     /// image is smaller than the window).
     std::atomic<bool> rcas_applied{false};
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    // The game window (launcher): size in pixels (0: the loader's size), 1-based monitor (dcp_displays.h), and
+    // the frame rate in the window title.
+    std::atomic<int> requested_width{0}, requested_height{0};
+    std::atomic<int> monitor{1};
+    std::atomic<bool> show_fps_title{false};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};
@@ -105,8 +114,10 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 /// A startup graphics option differs from the one this launch started with.
 bool GraphicsNeedRestart();
-/// Writes the file (menu changes).
+/// Writes the file (menu changes). Lines of keys it does not manage (the launcher's) are kept.
 void Save();
+/// Writes the display mode alone (F11).
+void SaveDisplayMode();
 
 /// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);

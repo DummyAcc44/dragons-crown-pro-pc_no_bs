@@ -1,14 +1,12 @@
-"""Run the loader on a prepared image and keep a log of the run.
+"""Run the loader on the development folders.
+
+The loader needs none of this to run: started alone it finds its folders next to the executable and writes the next
+numbered log (build/logs/dragons_crown_pro_NNN.log here) itself. Its output is echoed to the console.
 
 Usage: python scripts/run_game.py [--version 1.03] [--loader PATH] [--check-imports] [--timeout SECONDS] [--log FILE] [-- loader args]
-Everything the loader prints goes to the console and to build/logs/dragons_crown_pro_NNN.log
-(the next free number).
 """
 import argparse
-import datetime
 import json
-import os
-import re
 from pathlib import Path
 import subprocess
 import sys
@@ -26,9 +24,8 @@ def find_loader():
     return candidates[-1] if candidates else None
 
 
-def next_log(folder):
-    numbers = [int(m.group(1)) for f in folder.glob('dragons_crown_pro_*.log') if (m := re.fullmatch(r'dragons_crown_pro_(\d+)\.log', f.name))]
-    return folder / f'dragons_crown_pro_{max(numbers, default=0) + 1:03d}.log'
+def emit(line):
+    print(line, flush=True)
 
 
 def main():
@@ -52,50 +49,42 @@ def main():
 
     user = args.user_dir
     user.mkdir(parents=True, exist_ok=True)
-    log = args.log or next_log(ROOT / 'build' / 'logs')
-    log.parent.mkdir(parents=True, exist_ok=True)
-    print(f'Log: {log}')
     command = [str(loader), str(image / 'boot.bin'), '--content-profile', str(image / 'content.bin'),
                '--app0', str(view), '--user', str(user)]
+    if args.log:
+        args.log.parent.mkdir(parents=True, exist_ok=True)
+        command += ['--log', str(args.log)]
+    else:
+        command += ['--logs', str(ROOT / 'build' / 'logs')]
     if args.check_imports:
         command += ['--check-imports']
+    if args.timeout:
+        command += ['--dcp-skip-launcher']  # automated runs must not wait at the launcher
     command += args.extra
 
     profile = game_profiles.profile(view)
-    env = dict(os.environ)
-    for key, value in (profile['env'] if profile else {}).items():
-        env.setdefault(key, value)
-    env.setdefault('GOW3_CONFIG', str(user / 'dcp.ini'))
-    with open(log, 'w', encoding='utf-8', newline='\n') as out:
-        def emit(line):
-            out.write(line + '\n')
-            out.flush()
-            print(line, flush=True)
-        emit(f'[run] {datetime.datetime.now().isoformat(timespec="seconds")} '
-             f'{profile["name"] if profile else "unknown title"} {args.version}')
-        emit(f'[run] {subprocess.list2cmdline(command)}')
-        emit(f'[run] prepared root {view}')
-        try:
-            report = json.loads((image / 'image.json').read_text())
-            emit(f'[run] {report["title_id"]} APP_VER {report["app_ver"]}, eboot sha256 {report["eboot_sha256"][:16]}, '
-                 f'entry {report["entry"]}, image {report["image_bytes"]:,} bytes, sdk {report["sdk_version"]}')
-            emit(f'[run] modules {", ".join(m["file"] for m in report["modules"])}; imports {report["imports"]} '
-                 f'({report["native_bindings"]} bound natively, {report["unresolved"]} left to the runtime)')
-        except (OSError, KeyError, ValueError) as error:
-            emit(f'[run] image.json unreadable: {error}')
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, cwd=loader.parent, env=env)
-        timer = threading.Timer(args.timeout, process.kill) if args.timeout else None
-        if timer:
-            timer.start()
-        for raw in iter(process.stdout.readline, b''):
-            emit(raw.decode('utf-8', 'replace').rstrip('\r\n'))
-        code = process.wait()
-        if timer:
-            timer.cancel()
-        emit(f'[run] exit code {code}')
-        if code == LOAD_EXEC_EXIT:
-            emit('[run] the game requested sceSystemServiceLoadExec (see the LoadExec lines above)')
+    emit(f'[run] {profile["name"] if profile else "unknown title"} {args.version}')
+    try:
+        report = json.loads((image / 'image.json').read_text())
+        emit(f'[run] {report["title_id"]} APP_VER {report["app_ver"]}, eboot sha256 {report["eboot_sha256"][:16]}, '
+             f'entry {report["entry"]}, image {report["image_bytes"]:,} bytes, sdk {report["sdk_version"]}')
+        emit(f'[run] modules {", ".join(m["file"] for m in report["modules"])}; imports {report["imports"]} '
+             f'({report["native_bindings"]} bound natively, {report["unresolved"]} left to the runtime)')
+    except (OSError, KeyError, ValueError) as error:
+        emit(f'[run] image.json unreadable: {error}')
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, cwd=loader.parent)
+    timer = threading.Timer(args.timeout, process.kill) if args.timeout else None
+    if timer:
+        timer.start()
+    for raw in iter(process.stdout.readline, b''):
+        emit(raw.decode('utf-8', 'replace').rstrip('\r\n'))
+    code = process.wait()
+    if timer:
+        timer.cancel()
+    emit(f'[run] exit code {code}')
+    if code == LOAD_EXEC_EXIT:
+        emit('[run] the game requested sceSystemServiceLoadExec (see the LoadExec lines above)')
     return code
 
 

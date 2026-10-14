@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -10,6 +12,8 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "imgui/renderer/imgui_core.h"
+#include "gow3_graphics.h"
+#include "gow3_settings.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
@@ -99,6 +103,23 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                    bool enable_validation /*= false*/, bool enable_crash_diagnostic /*= false*/)
     : Instance(window.GetWindowInfo(), physical_device_index, enable_validation, enable_crash_diagnostic) {}
 
+bool IsDeviceUsable(vk::PhysicalDevice physical) {
+    if (physical.getProperties().apiVersion < TargetVulkanApiVersion) {
+        return false;
+    }
+    const auto extensions = GetSupportedExtensions(physical);
+    for (const char* required : {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+                                 VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME,
+                                 VK_EXT_ROBUSTNESS_2_EXTENSION_NAME}) {
+        if (std::ranges::find(extensions, std::string_view{required}) == extensions.end()) {
+            return false;
+        }
+    }
+    const auto chain = physical.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceRobustness2FeaturesEXT>();
+    const auto& robustness2 = chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+    return robustness2.robustBufferAccess2 && robustness2.robustImageAccess2 && robustness2.nullDescriptor;
+}
+
 Instance::Instance(s32 index, bool validation)
     : Instance(Frontend::WindowSystemInfo{}, index, validation, false) {}
 
@@ -113,6 +134,24 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
 
+    if (physical_device_index < 0) {
+        const std::string& requested = Gow3Settings::Get().graphics_card;
+        if (requested.empty()) {
+            std::printf("GPU: selection Automatic\n");
+        } else {
+            std::vector<std::string> names;
+            for (const auto& physical : physical_devices) {
+                names.push_back(IsDeviceUsable(physical) ? std::string(physical.getProperties().deviceName.data()) : "");
+            }
+            const int found = Gow3Graphics::FindGpuByName(names, requested);
+            if (found >= 0) {
+                std::printf("GPU: requested %s\n", requested.c_str());
+                physical_device_index = found;
+            } else {
+                std::printf("GPU: requested device %s unavailable, falling back to Automatic\n", requested.c_str());
+            }
+        }
+    }
     if (physical_device_index < 0) {
         std::vector<
             std::tuple<size_t, vk::PhysicalDeviceProperties2, vk::PhysicalDeviceMemoryProperties>>

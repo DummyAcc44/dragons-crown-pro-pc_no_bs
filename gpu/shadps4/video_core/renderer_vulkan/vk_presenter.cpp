@@ -152,6 +152,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     }
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
+    smaa_pass.Create(device, instance.GetAllocator());
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
@@ -478,6 +479,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // gow3: FSR 1, RCAS and its strength come from the in-game menu, every frame.
     const auto& graphics = Gow3Settings::Get();
+    // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
+    // the post process pass still sRGB encoded and has to be decoded there instead.
+    pp_settings.srgb_input =
+        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+    if (graphics.smaa) {
+        image_view = smaa_pass.Render(cmdbuf, draw_scheduler, image_view, image_size, !pp_settings.srgb_input);
+    }
     fsr_settings.enable = graphics.fsr1;
     fsr_settings.use_rcas = graphics.rcas;
     fsr_settings.rcas_attenuation = Gow3Graphics::RcasAttenuation(graphics.rcas_strength);
@@ -492,10 +500,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
 
-    // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
-    // the post process pass still sRGB encoded and has to be decoded there instead.
-    pp_settings.srgb_input =
-        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass).

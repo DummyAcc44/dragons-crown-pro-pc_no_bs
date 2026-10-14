@@ -25,12 +25,13 @@ game\Dragons.Crown.Pro.PS4-DUPLEX.pkg
 tools\setup.ps1 -InstallPython   # checks prerequisites; creates .venv with the one package needed
 tools\inspect-game.ps1           # read-only PKG metadata and profile check
 tools\build.ps1                  # prepares what is stale (video core deps, game, boot image), then CMake + Ninja, incrementally
-tools\build.ps1 -Run             # the same, then launches the build; log in build\logs\dragons_crown_pro_NNN.log
+tools\build.ps1 -Run             # the same, then launches the build (the launcher first); log in build\logs\dragons_crown_pro_NNN.log
+tools\test.ps1                   # focused launcher tests (synthetic data, no window)
 tools\clean.ps1                  # remove generated build output only
 ```
 
-See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for metadata, layout, import inventory and the first-boot hand-off, and
-[docs/REFERENCES.md](docs/REFERENCES.md) for why this architecture.
+See [docs/LAUNCHER.md](docs/LAUNCHER.md) for the launcher, [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for metadata, layout,
+import inventory and the first-boot hand-off, and [docs/REFERENCES.md](docs/REFERENCES.md) for why this architecture.
 
 ## Layout
 
@@ -39,6 +40,9 @@ See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for metadata, layout, import inventor
 | `tools\` | PowerShell entry points |
 | `scripts\` | Python: PKG inspection/unpacking, title profile, boot image, import names and inventory |
 | `src\` | C: loader, PS4 runtime (`runtime_*.c`), Windows compat, video core interface (`dcpgpu.h`) |
+| `launcher\` | C++: the launcher (TRG Launcher, SDL3, Dear ImGui) the loader opens first; game file check, settings |
+| `packaging\` | application icon (SVG, PNGs, ICO) and third-party license notes |
+| `tests\` | focused launcher tests |
 | `gpu\` | Video core: vendored shadPS4 renderer/recompiler/Gnm/VideoOut + shim (`gpu/VENDOR.txt`); pinned deps in `gpu/deps.txt` |
 | `docs\` | Engineering notes |
 
