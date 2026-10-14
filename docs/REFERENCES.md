@@ -45,9 +45,8 @@ All candidates are shadPS4 `b4e7ae7` plus the gow3 shim. Compared with `diff -rq
 Uncharted's tree is medievil's with the GoW actor/orb shims removed and no extra code, so it has the least
 contamination (`gow3:` marker lines: 286 vs 318 in gow3_pc). Its `videodec2` addition is unused here (no
 `libSceVideodec2` import) and can be left out. Build cost is shared by all: C++23 with clang, six pinned third-party
-sources (`gpu/deps.txt`), about twenty MSYS2 packages. **Not vendored in this phase**: it cannot be exercised without
-the first-boot runtime pieces and adds a long C++ build; `src/dcpgpu.h` is the interface and `src/gpu_stub.c`
-stands in. Cherry-pick from tlg/gr2/iss only when a symptom matches (RDNA2 black lines, multisampling).
+sources (`gpu/deps.txt`), about twenty MSYS2 packages. Vendored in phase 2 once the boot path reached `sceVideoOutOpen` (see FIRST_BOOT.md);
+`src/dcpgpu.h` is the interface. Cherry-pick from tlg/gr2/iss only when a symptom matches (RDNA2 black lines, multisampling).
 
 ## What was taken
 

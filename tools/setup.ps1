@@ -48,16 +48,11 @@ if (-not $root) {
     $status = Get-ToolchainStatus 'clang64'
     if ($status.Ready) {
         $version = (& (Join-Path $status.Bin 'clang.exe') --version | Select-Object -First 1)
-        Write-Ok "clang, CMake, Ninja, pkgconf, SDL3 ($($status.Bin)): $version"
+        Write-Ok "clang, CMake, Ninja, pkgconf, SDL3, FreeType, Vulkan loader, glslang ($($status.Bin)): $version"
     } else {
         Write-Bad "CLANG64 incomplete, missing: $($status.Missing -join ', ')"; $problems++
         Write-Host '         Install from an "MSYS2 CLANG64" shell:'
         Write-Host "         pacman -S --needed $script:Clang64Packages"
-    }
-    if ($status.VideoCoreMissing.Count -eq 0) { Write-Ok 'Vulkan loader and glslang (video core, feature/first-boot)' }
-    else {
-        Write-Warn "video core libraries not installed yet (missing: $($status.VideoCoreMissing -join ', ')); not needed to build now"
-        Write-Host "         For feature/first-boot: pacman -S --needed $script:VideoCorePackages"
     }
 }
 

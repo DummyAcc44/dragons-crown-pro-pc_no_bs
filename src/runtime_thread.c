@@ -335,6 +335,11 @@ static ABI int32_t thread_detach(GuestThread *t) {
     if (!t->host_owned) pthread_detach(t->host);
     return 0;
 }
+static ABI int32_t thread_cancel(GuestThread *t) {
+    if (!find_thread(t) || t->finished) return ERR(3);
+    fputs("STOP: scePthreadCancel of a running thread is not supported\n",stderr);
+    exit(21);
+}
 static ABI __attribute__((noreturn)) void thread_exit(void *value) {
     GuestThread *t=runtime_thread_current();
     if (t->host_owned) { fputs("STOP: pthread_exit on host-owned/main thread\n",stderr); exit(21); }
@@ -394,7 +399,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"-quPa4SEJUw#libkernel",attr_get_stack_full},
         {"FXPWHNk8Of0#libkernel",attr_get_param}, {"El+cQ20DynU#libkernel",attr_set_guard},
         {"6UgtwV+0zb4#libkernel",thread_create}, {"onNY9Byn-W8#libkernel",thread_join},
-        {"4qGrR6eoP9Y#libkernel",thread_detach}, {"3kg7rT0NQIs#libkernel",thread_exit},
+        {"4qGrR6eoP9Y#libkernel",thread_detach}, {"qBDmpCyGssE#libkernel",thread_cancel}, {"3kg7rT0NQIs#libkernel",thread_exit},
         {"T72hz6ffq08#libkernel",thread_yield}, {"1tKyG7RlMJo#libkernel",thread_get_prio},
         {"W0Hpm2X0uPE#libkernel",thread_set_prio}, {"bt3CTBKmGyI#libkernel",thread_set_affinity}, {"rcrVFJsQWRY#libkernel",thread_get_affinity},
         {"GBUY7ywdULE#libkernel",thread_rename}, {"3PtV6p3QNX4#libkernel",thread_equal},

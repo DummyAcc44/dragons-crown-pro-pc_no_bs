@@ -197,7 +197,7 @@ static ABI int32_t voice_info(uint32_t port,uint32_t *info) {
 /* ---- Common dialogs: nothing is displayed; an opened dialog finishes. ---- */
 typedef struct { const char *name; int initialized, status; uint32_t button; } Dialog;
 static Dialog dialogs[]={{"CommonDialog",0,0,0},{"MsgDialog",0,0,0},{"SaveDataDialog",0,0,0},
-                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0}};
+                         {"NpProfileDialog",0,0,0},{"NpCommerceDialog",0,0,0},{"ImeDialog",0,0,0},{"ErrorDialog",0,0,0}};
 #define DIALOG_RUNNING 2
 #define DIALOG_FINISHED 3
 #define DIALOG_NOT_FINISHED ((int32_t)0x80B80005)
@@ -207,6 +207,10 @@ static Dialog dialogs[]={{"CommonDialog",0,0,0},{"MsgDialog",0,0,0},{"SaveDataDi
 #define DIALOG_NOT_SUPPORTED ((int32_t)0x80B8000F)
 static int common_initialized;
 static ABI int32_t common_init(void) { common_initialized=1; return 0; }
+static ABI int32_t common_is_used(void) {
+    for (size_t i=0;i<sizeof(dialogs)/sizeof(*dialogs);++i) if (dialogs[i].status==DIALOG_RUNNING) return 1;
+    return 0;
+}
 static int32_t dialog_init(int i) {
     if (dialogs[i].initialized) return (int32_t)0x80B80004;
     dialogs[i].initialized=1; dialogs[i].status=1; return 0;
@@ -249,6 +253,13 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_status(void) { return dialog_status(i); } \
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
 DIALOG(profile,3) DIALOG(commerce,4)
+static ABI int32_t error_init(void) { return dialog_init(6); }
+static ABI int32_t error_status(void) { return dialog_status(6); }
+static ABI int32_t error_term(void) { return dialog_term(6); }
+static ABI int32_t error_open(const int32_t *param) {
+    if (param) printf("[DEBUG_SAULO][ErrorDialog] error code 0x%08x\n",(unsigned)param[1]);
+    return dialog_open(6);
+}
 /* OrbisMsgDialogParam: BaseParam (48 bytes), size, mode (2 = progress bar).
  * OrbisSaveDataDialogParam: BaseParam, int32 size, mode (5 = progress bar). */
 static int32_t dialog_open_mode(int i, const unsigned char *param, size_t mode_offset, uint32_t progress_mode) {
@@ -727,7 +738,7 @@ static const RuntimeExport exports[]={
     {"sceNpMatching2CreateContext",np_signed_out},
     {"sceNpSignalingInitialize",ok_void}, {"sceNpSignalingTerminate",ok_void},
     {"sceNpSignalingCreateContext",np_signed_out},
-    {"sceCommonDialogInitialize",common_init},
+    {"sceCommonDialogInitialize",common_init}, {"sceCommonDialogIsUsed",common_is_used},
     {"sceMsgDialogInitialize",msg_init}, {"sceMsgDialogOpen",msg_open},
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
     {"sceMsgDialogClose",msg_close}, {"sceMsgDialogProgressBarSetValue",msg_progress},
@@ -740,6 +751,9 @@ static const RuntimeExport exports[]={
     {"sceNpProfileDialogInitialize",profile_init}, {"sceNpProfileDialogOpen",profile_open},
     {"sceNpProfileDialogUpdateStatus",profile_status}, {"sceNpProfileDialogTerminate",profile_term},
     {"sceNpProfileDialogGetResult",profile_result},
+    {"sceErrorDialogInitialize",error_init}, {"sceErrorDialogOpen",error_open},
+    {"sceErrorDialogGetStatus",error_status}, {"sceErrorDialogUpdateStatus",error_status},
+    {"sceErrorDialogTerminate",error_term},
     {"sceNpCommerceDialogInitialize",commerce_init}, {"sceNpCommerceDialogOpen",commerce_open},
     {"sceNpCommerceDialogUpdateStatus",commerce_status}, {"sceNpCommerceDialogTerminate",commerce_term},
     {"sceImeDialogInit",ime_init}, {"sceImeDialogGetStatus",ime_status}, {"sceImeDialogGetResult",ime_result},

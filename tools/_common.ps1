@@ -59,18 +59,16 @@ function Get-Msys2Root {
 $script:Toolchains = [ordered]@{
     clang64 = @{ Dir = 'clang64'; Compiler = 'clang.exe'; Package = 'mingw-w64-clang-x86_64' }
 }
-# Needed to build the loader and runtime now.
-$script:BuildTools = @('clang.exe', 'cmake.exe', 'ninja.exe', 'pkgconf.exe', 'SDL3.dll')
-$script:Clang64Packages = 'mingw-w64-clang-x86_64-{toolchain,cmake,ninja,pkgconf,sdl3}'
-# Needed once the shadPS4-derived video core is vendored (feature/first-boot).
-$script:VideoCoreTools = @('glslang.exe', 'vulkan-1.dll')
-$script:VideoCorePackages = 'mingw-w64-clang-x86_64-{vulkan-headers,vulkan-loader,vulkan-memory-allocator,glslang} ' +
+# Needed to build the loader, runtime and video core.
+$script:BuildTools = @('clang.exe', 'cmake.exe', 'ninja.exe', 'pkgconf.exe', 'SDL3.dll', 'glslang.exe', 'vulkan-1.dll', 'libfreetype-6.dll')
+$script:Clang64Packages = 'mingw-w64-clang-x86_64-{toolchain,cmake,ninja,pkgconf,sdl3,freetype} ' +
+    'mingw-w64-clang-x86_64-{vulkan-headers,vulkan-loader,vulkan-memory-allocator,glslang} ' +
     'mingw-w64-clang-x86_64-{fmt,boost,robin-map,xxhash,ffmpeg,zydis,spirv-tools,spirv-headers,spirv-cross}'
 
 function Get-ToolchainStatus([string]$Name) {
     $info = $script:Toolchains[$Name]
     $root = Get-Msys2Root
-    $status = @{ Name = $Name; Ready = $false; Bin = $null; Missing = @(); VideoCoreMissing = @() }
+    $status = @{ Name = $Name; Ready = $false; Bin = $null; Missing = @() }
     if (-not $root) { $status.Missing = @('MSYS2'); return $status }
     $bin = Join-Path $root "$($info.Dir)\bin"
     $status.Bin = $bin
@@ -78,7 +76,6 @@ function Get-ToolchainStatus([string]$Name) {
         if (-not (Test-Path -LiteralPath (Join-Path $bin $tool))) { $status.Missing += $tool }
     }
     $status.Ready = ($status.Missing.Count -eq 0)
-    $status.VideoCoreMissing = @($script:VideoCoreTools | Where-Object { -not (Test-Path -LiteralPath (Join-Path $bin $_)) })
     return $status
 }
 
@@ -93,4 +90,35 @@ function Resolve-Toolchain([string]$Requested) {
         if ($status.Ready) { return $status }
     }
     Stop-Tool 'MSYS2 CLANG64 toolchain or libraries missing. Run tools\setup.ps1 for what to install.'
+}
+
+# Fetches the pinned sources in gpu\deps.txt that are missing or at another commit, then applies gpu\patches.
+function Sync-GpuDependencies {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { Stop-Tool 'git is needed to fetch the video core dependencies (gpu\deps.txt).' }
+    $gpu = Join-Path $script:RepoRoot 'gpu'
+    foreach ($line in Get-Content -LiteralPath (Join-Path $gpu 'deps.txt')) {
+        if ($line -match '^\s*(#|$)') { continue }
+        $path, $url, $commit = -split $line
+        $dir = Join-Path $gpu $path
+        $stamp = Join-Path $dir '.dcp_commit'
+        if ((Test-Path -LiteralPath $stamp) -and (Get-Content -LiteralPath $stamp -Raw).Trim() -eq $commit) { continue }
+        Write-Step "Fetching $path ($($commit.Substring(0, 7)))"
+        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        & git -C $dir init --quiet
+        & git -C $dir fetch --quiet --depth 1 $url $commit
+        if ($LASTEXITCODE -ne 0) { Stop-Tool "git fetch failed for $url" }
+        & git -C $dir -c advice.detachedHead=false checkout --quiet FETCH_HEAD
+        if (Test-Path -LiteralPath (Join-Path $dir '.gitmodules')) {
+            & git -C $dir submodule update --quiet --init --recursive --depth 1
+            if ($LASTEXITCODE -ne 0) { Stop-Tool "submodules of $path failed" }
+        }
+        $patches = Join-Path $gpu ('patches\' + (Split-Path $path -Leaf))
+        foreach ($patch in @(Get-ChildItem -LiteralPath $patches -Filter '*.patch' -ErrorAction SilentlyContinue)) {
+            & git -C $dir apply $patch.FullName
+            if ($LASTEXITCODE -ne 0) { Stop-Tool "patch $($patch.Name) does not apply to $path" }
+        }
+        Set-Content -LiteralPath $stamp -Value $commit -Encoding ASCII
+    }
 }

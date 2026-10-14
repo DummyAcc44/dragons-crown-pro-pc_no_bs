@@ -18,6 +18,7 @@ param(
 . (Join-Path $PSScriptRoot '_common.ps1')
 $tc = Resolve-Toolchain $Toolchain
 $info = $script:Toolchains[$tc.Name]
+Sync-GpuDependencies
 
 $buildDir = Join-Path $script:RepoRoot "build\cmake\$($tc.Name)"
 $env:PATH = "$($tc.Bin);$env:PATH"

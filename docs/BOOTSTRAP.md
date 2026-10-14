@@ -7,7 +7,7 @@ choices: [REFERENCES.md](REFERENCES.md).
 
 The PS4 x86-64 code of the game runs directly on the host CPU (not an emulator, not static recompilation).
 `src/` replaces the PS4 system libraries; a shadPS4-derived video core will translate GNM to Vulkan (`src/dcpgpu.h`
-is its interface, `src/gpu_stub.c` stands in until first boot). Pipeline:
+is its interface; vendored in phase 2, see [FIRST_BOOT.md](FIRST_BOOT.md)). Pipeline:
 
 ```
 game\*.pkg --pkg_extract--> game\extracted\base --hard links--> game\prepared\v1.03   (the /app0 tree)

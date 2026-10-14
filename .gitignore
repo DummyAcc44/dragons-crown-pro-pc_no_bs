@@ -33,3 +33,10 @@ eboot.bin
 *.cpk
 *.psarc
 *.plt
+
+# Video core dependencies fetched by tools\build.ps1 (gpu\deps.txt); sirit, gcn, half and fonts are vendored
+/gpu/third_party/fsr-vulkan/
+/gpu/third_party/imgui/
+/gpu/third_party/magic_enum/
+/gpu/third_party/miniz/
+/gpu/third_party/xbyak/

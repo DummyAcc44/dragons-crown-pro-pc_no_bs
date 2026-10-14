@@ -248,6 +248,12 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (audio) return audio;
     uintptr_t pad = runtime_pad_resolve(name);
     if (pad) return pad;
+    uintptr_t font = runtime_font_resolve(name);
+    if (font) return font;
+    uintptr_t eventflag = runtime_eventflag_resolve(name);
+    if (eventflag) return eventflag;
+    uintptr_t title = runtime_dcp_resolve(name);
+    if (title) return title;
     return dcpgpu_resolve(name);
 }
 static const struct { const char *nid, *symbol; } import_names[]={

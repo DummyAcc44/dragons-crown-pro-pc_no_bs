@@ -9,7 +9,7 @@ emulator.
 |---|---|
 | Title | CUSA10454, content ID `UP2611-CUSA10454_00-DRAGONSCROWNPRO1` |
 | Version | `VERSION 01.03` (`APP_VER 01.00`), single base package |
-| Status | **Phase 1, bootstrap**: tooling, preparation, loader/runtime skeleton and import inventory. The loader maps the game and stops at the first unsupported import; no graphics yet. |
+| Status | **Phase 2, first boot**: the game runs to its title screen through the loader and the shadPS4-derived video core ([docs/FIRST_BOOT.md](docs/FIRST_BOOT.md)). |
 
 **No game files are in this repository.** Supply your own dump as a fake PKG:
 
@@ -25,7 +25,7 @@ game\Dragons.Crown.Pro.PS4-DUPLEX.pkg
 tools\setup.ps1 -InstallPython   # checks prerequisites; creates .venv with the one package needed
 tools\inspect-game.ps1           # read-only PKG metadata and profile check
 tools\prepare-game.ps1           # unpack (resumable), build the /app0 view and the boot image
-tools\build.ps1                  # MSYS2 CLANG64: CMake + Ninja -> build\cmake\clang64\bin\dcp-loader.exe
+tools\build.ps1                  # MSYS2 CLANG64: fetches pinned video core deps, CMake + Ninja -> build\cmake\clang64\bin\dcp-loader.exe
 tools\run.ps1 -CheckImports      # list PS4 imports the runtime lacks, without running the game
 tools\run.ps1 -TimeoutSeconds 60 # controlled run; log in user\last_run.log
 tools\clean.ps1                  # remove generated build output only
@@ -40,7 +40,8 @@ See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for metadata, layout, import inventor
 |---|---|
 | `tools\` | PowerShell entry points |
 | `scripts\` | Python: PKG inspection/unpacking, title profile, boot image, import names and inventory |
-| `src\` | C: loader, PS4 runtime (`runtime_*.c`), Windows compat, video core interface (`dcpgpu.h`) and stub |
+| `src\` | C: loader, PS4 runtime (`runtime_*.c`), Windows compat, video core interface (`dcpgpu.h`) |
+| `gpu\` | Video core: vendored shadPS4 renderer/recompiler/Gnm/VideoOut + shim (`gpu/VENDOR.txt`); pinned deps in `gpu/deps.txt` |
 | `docs\` | Engineering notes |
 
 ## License
