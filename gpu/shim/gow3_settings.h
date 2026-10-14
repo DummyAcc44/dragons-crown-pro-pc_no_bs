@@ -48,7 +48,7 @@ struct Values {
     std::atomic<int> display_mode{0};
     std::atomic<bool> vsync{true};
     std::atomic<int> fps_limit{0};
-    std::atomic<bool> async_shaders{true};
+    std::atomic<bool> async_shaders{false};
     std::atomic<bool> fsr1{false};
     std::atomic<bool> rcas{true};
     std::atomic<int> rcas_strength{75};

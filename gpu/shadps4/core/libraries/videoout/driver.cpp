@@ -305,7 +305,63 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
+// [DEBUG_SAULO][Flicker]: odd flips (no buffer, or an interval outside 8-34 ms); 5 lines in the
+// first 5 s, then 60 more. All are counted.
+static void LogOddFlip(s32 index, VAddr address) {
+    using Clock = std::chrono::steady_clock;
+    static const auto start = Clock::now();
+    static auto last = start;
+    static u64 flips, odd_flips;
+    static u32 early_logged, late_logged;
+    static const struct Summary {
+        ~Summary() {
+            std::printf("[DEBUG_SAULO][Flicker] total_odd_flips=%llu logged=%u\n",
+                        static_cast<unsigned long long>(odd_flips), early_logged + late_logged);
+        }
+    } summary;
+    const auto now = Clock::now();
+    const double gap_ms = std::chrono::duration<double, std::milli>(now - last).count();
+    const auto time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+    last = now;
+    ++flips;
+    struct Entry {
+        s64 time_ms;
+        u64 flip;
+        s32 index;
+        VAddr address;
+        double gap_ms;
+    };
+    static std::array<Entry, 4> recent{};
+    const Entry entry{time_ms, flips, index, address, gap_ms};
+    const auto history = recent;
+    std::copy(recent.begin() + 1, recent.end(), recent.begin());
+    recent.back() = entry;
+    if (!(index < 0 || (flips > 1 && (gap_ms < 8.0 || gap_ms > 34.0)))) {
+        return;
+    }
+    ++odd_flips;
+    u32& logged = time_ms < 5000 ? early_logged : late_logged;
+    if (logged < (time_ms < 5000 ? 5u : 60u)) {
+        ++logged;
+        LOG_WARNING(Lib_VideoOut,
+                    "[DEBUG_SAULO][Flicker] time_ms={} flip={} index={} address={:#x} gap_ms={:.1f} total={}",
+                    time_ms, flips, index, address, gap_ms, odd_flips);
+        for (size_t i = 0; i < history.size(); ++i) {
+            const Entry& e = history[i];
+            if (e.flip == 0) {
+                continue;
+            }
+            LOG_WARNING(Lib_VideoOut,
+                        "[DEBUG_SAULO][FlickerContext] odd={} back={} time_ms={} flip={} index={} "
+                        "address={:#x} gap_ms={:.1f} same_as_next={}",
+                        odd_flips, history.size() - i, e.time_ms, e.flip, e.index, e.address, e.gap_ms,
+                        (i + 1 < history.size() ? history[i + 1].address : address) == e.address);
+        }
+    }
+}
+
 void VideoOutDriver::Flip(const Request& req) {
+    LogOddFlip(req.index, req.index >= 0 ? req.port->buffer_slots[req.index].address_left : 0);
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);

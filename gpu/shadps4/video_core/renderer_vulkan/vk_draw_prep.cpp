@@ -51,9 +51,8 @@ u32 DefaultWorkerCount() {
     if (const char* env = std::getenv("GOW3_PREP_WORKERS")) {
         return static_cast<u32>(std::clamp(std::atoi(env), 0, 16));
     }
-    // Workers are SCHED_IDLE and claim whole buffers, so more of them only use more idle
-    // cores: half the hardware threads (Steam Deck 4, 16-thread desktop 8).
-    return std::clamp<u32>(Gow3Threads::Available() / 2, 1, 8);
+    // Prepared draws could still draw from stale data in Dragon's Crown: off unless asked for.
+    return 0;
 }
 
 /// Flattened user data of one submission: chunks never move, so the GPU thread can read a

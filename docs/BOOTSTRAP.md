@@ -15,7 +15,7 @@ game\*.pkg --pkg_extract--> game\extracted\base --hard links--> game\prepared\v1
                                                                   v
                                        build\image\v1.03\{boot.bin, content.bin, image.json}
                                                                   | dcp-loader.exe
-                                                                  v   log: user\last_run.log
+                                                                  v   log: build\logs\dragons_crown_pro_NNN.log
 ```
 
 `prepare_image.py` maps `eboot.bin` plus the bundled modules in profile order (`libc.prx`, `libSceFios2.prx`,
@@ -49,7 +49,7 @@ The profile is `scripts/game_profiles.py`; only the facts above are in it.
 | `game\extracted\base` | Unpacked package (resumable, `.pkg_extracted` marker). `core` scope = eboot, modules, `sce_sys`, `.plt` (25 MB); `full` = also both CPK archives (5.7 GB) | no |
 | `game\prepared\v1.03` | Hard-link view that reproduces `/app0` | no |
 | `build\image\v1.03` | Boot image and `image.json` | no |
-| `user\` | Saves, `last_run.log`, caches at run time | no |
+| `user\` | Saves, caches at run time | no |
 
 There is a single layer, so there is no overlay order to decide; `game_view.build_view` already takes a layer list if
 an update ever appears. Core scope is enough for the loader now; the CPKs are only read by the game at run time
@@ -62,8 +62,8 @@ an update ever appears. Core scope is enough for the loader now; the CPKs are on
 | `tools\setup.ps1 [-InstallPython]` | Reports Python, `cryptography`, MSYS2 CLANG64 (clang, CMake, Ninja, pkgconf, SDL3), video-core libraries (warn only), package, free disk. `-InstallPython` creates `.venv` with `cryptography` only. |
 | `tools\inspect-game.ps1 [-List]` | PKG metadata, profile check, executables/modules report once extracted. Read-only. |
 | `tools\prepare-game.ps1 [-Scope core\|full]` | Extract, build view, verify eboot hash and modules, build the boot image. |
-| `tools\build.ps1 [-Reconfigure]` | CMake + Ninja, incremental, `build\cmake\clang64\bin\dcp-loader.exe`. |
-| `tools\run.ps1 [-CheckImports] [-TimeoutSeconds N]` | Runs the loader, tees to `user\last_run.log` (previous kept as `.prev.log`). |
+| `tools\build.ps1 [-Run] [-Clean]` | The normal command. Updates what is stale (GPU deps, unpacked/prepared game, boot image), configures when needed, builds incrementally, checks the outputs; `-Run` launches that binary and logs to `build\logs\dragons_crown_pro_NNN.log` (next free number). `-CheckImports` (diagnostic) lists imports the runtime lacks. |
+| `tools\run.ps1` | Wrapper for `tools\build.ps1 -Run`. |
 | `tools\clean.ps1 [-Prepared] [-Logs] [-WhatIf]` | Removes `build\`, `dist\`; optionally the link views and logs. Never touches the `.pkg`, `game\extracted` or saves. |
 | `scripts\import_inventory.py` | Import inventory, see below. |
 
@@ -89,7 +89,7 @@ Environment variables keep the runtime's names with the `DCP_` prefix (`DCP_USER
 
 ## Logging and diagnostics
 
-`user\last_run.log` starts with the command line, prepared root, CUSA, `APP_VER`, eboot hash prefix, entry, image size,
+`build\logs\dragons_crown_pro_NNN.log` starts with the command line, prepared root, CUSA, `APP_VER`, eboot hash prefix, entry, image size,
 SDK, module list and import counts, then everything the loader prints and `[run] exit code N`. The Windows loader already
 carries a fault reporter (registers, stack words, rbp chain with guest offsets); no minidumps. No `DEBUG_SAULO`
 diagnostics were added.
@@ -113,8 +113,8 @@ in short Dragon's Crown needs fewer libraries than Uncharted and is closest to M
 Commands:
 
 ```powershell
-tools\run.ps1 -CheckImports   # runtime's own list of imports it cannot bind; nothing runs
-.venv\Scripts\python.exe -I scripts\import_inventory.py --check-log user\last_run.log `
+tools\build.ps1 -Run -CheckImports   # runtime's own list of imports it cannot bind; nothing runs
+.venv\Scripts\python.exe -I scripts\import_inventory.py --check-log build\logs\dragons_crown_pro_NNN.log `
   --reference medievil=<ref>\medievil_pc\src\import_names.inc --source medievil=<ref>\medievil_pc\src,<ref>\medievil_pc\gpu\shadps4,<ref>\medievil_pc\gpu\shim
 ```
 
@@ -125,7 +125,7 @@ tools\run.ps1 -CheckImports   # runtime's own list of imports it cannot bind; no
 - Incremental build: second `tools\build.ps1` reports no work; clean build had no warnings.
 - `loader.c` and the runtime are identical to the Uncharted sources apart from renames, the default window title and the
   removal of Ajm, so the mapping/relocation/protection code was not changed.
-- One controlled loader run (`tools\run.ps1 -TimeoutSeconds 60`): maps 18,841,696 bytes in 12 segments, applies 381,806
+- One controlled loader run (`tools\run.ps1 -TimeoutSeconds 60`, an early diagnostic run): maps 18,841,696 bytes in 12 segments, applies 381,806
   relocations, enters the `libc.prx` initialiser and stops at the first unresolved import, as designed. Not a boot attempt.
 
 ## First-boot hand-off (`feature/first-boot`)
@@ -147,9 +147,7 @@ tools\run.ps1 -CheckImports   # runtime's own list of imports it cannot bind; no
 First controlled boot attempt:
 
 ```powershell
-tools\prepare-game.ps1 -Scope full
-tools\build.ps1
-tools\run.ps1 -TimeoutSeconds 60      # today: stops at sceLibcHeapGetTraceInfo, exit 20
+tools\build.ps1 -Run
 ```
 
 Recommended first action: add `sceLibcHeapGetTraceInfo` in a new `src/runtime_dcp.c` (title-specific imports kept apart, as
@@ -159,3 +157,7 @@ medievil's `runtime_extra.c`), rerun, and only then vendor the video core.
 
 Video core vendoring and its dependencies, any rendering, Font/Np/Rudp/dialog imports, input and audio behaviour, CPU
 compatibility rewriting (gow3 `isa_rewrite`), save-data behaviour, launcher, patches, performance work.
+
+## Canonical build
+
+One configuration, `RelWithDebInfo` (`-O2 -g -DNDEBUG`, the CMake default in `CMakeLists.txt`), in `build\cmake\clang64`. It is what `tools\build.ps1 -Run` launches and what a package step must take as it is; there is no separate Release tree. Nothing in `CMakeLists.txt` or `gpu\CMakeLists.txt` branches on the build type, and the video core defines `NDEBUG` itself, so debug info is the only difference from Release.

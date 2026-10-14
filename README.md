@@ -24,10 +24,8 @@ game\Dragons.Crown.Pro.PS4-DUPLEX.pkg
 ```powershell
 tools\setup.ps1 -InstallPython   # checks prerequisites; creates .venv with the one package needed
 tools\inspect-game.ps1           # read-only PKG metadata and profile check
-tools\prepare-game.ps1           # unpack (resumable), build the /app0 view and the boot image
-tools\build.ps1                  # MSYS2 CLANG64: fetches pinned video core deps, CMake + Ninja -> build\cmake\clang64\bin\dcp-loader.exe
-tools\run.ps1 -CheckImports      # list PS4 imports the runtime lacks, without running the game
-tools\run.ps1 -TimeoutSeconds 60 # controlled run; log in user\last_run.log
+tools\build.ps1                  # prepares what is stale (video core deps, game, boot image), then CMake + Ninja, incrementally
+tools\build.ps1 -Run             # the same, then launches the build; log in build\logs\dragons_crown_pro_NNN.log
 tools\clean.ps1                  # remove generated build output only
 ```
 

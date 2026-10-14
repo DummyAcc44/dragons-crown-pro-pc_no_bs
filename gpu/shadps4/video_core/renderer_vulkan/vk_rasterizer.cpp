@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
@@ -76,7 +77,29 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     });
 }
 
-Rasterizer::~Rasterizer() = default;
+// [DEBUG_SAULO][PreparedDraw]: 5 lines in the first 5 s, then 50 more.
+static const auto dbg_start = std::chrono::steady_clock::now();
+static std::atomic<u32> dbg_mismatches{}, dbg_early{}, dbg_late{};
+
+static void LogPreparedMismatch(u64 tick, u32 slot, u64 old_base, u64 new_base) {
+    const u64 count = dbg_mismatches.fetch_add(1) + 1;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - dbg_start).count();
+    if ((ms < 5000 ? dbg_early : dbg_late).fetch_add(1) < (ms < 5000 ? 5u : 50u)) {
+        LOG_WARNING(Render_Vulkan,
+                    "[DEBUG_SAULO][PreparedDraw] time_ms={} frame={} draw={} vb={} old_base={:#x} new_base={:#x} "
+                    "descriptor_changed=1 total={}",
+                    ms, Gow3Stats::gpu_frames.load(std::memory_order_relaxed), tick, slot, old_base,
+                    new_base, count);
+    }
+}
+
+Rasterizer::~Rasterizer() {
+    if (dbg_mismatches) {
+        LOG_WARNING(Render_Vulkan, "[DEBUG_SAULO][PreparedDraw] total_descriptor_mismatches={} logged={}",
+                    dbg_mismatches.load(), std::min(dbg_early.load(), 5u) + std::min(dbg_late.load(), 50u));
+    }
+}
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
@@ -1734,6 +1757,19 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
                 !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)
             ? &prepared->vertex
             : nullptr;
+    if (ready) {
+        // The V# tables live in guest memory behind a user data pointer, outside the verified
+        // flattened user data: a worker may have read them before the stream wrote them.
+        const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+        for (u32 i = 0; i < ready->count; ++i) {
+            const auto current = fetch->attributes[i].GetSharp(vs_info);
+            if (std::memcmp(&current, &ready->buffers[i], sizeof(current)) != 0) {
+                LogPreparedMismatch(scheduler.CurrentTick(), i, ready->buffers[i].base_address, current.base_address);
+                ready = nullptr;
+                break;
+            }
+        }
+    }
     if (ready) {
         attributes.assign(ready->attributes, ready->attributes + ready->count);
         bindings.assign(ready->bindings, ready->bindings + ready->count);

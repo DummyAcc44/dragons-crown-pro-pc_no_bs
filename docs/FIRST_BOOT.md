@@ -2,14 +2,14 @@
 
 ## Result
 
-On this machine (RTX 4070, Vulkan 1.4, Xbox controller) `tools\run.ps1` runs Dragon's Crown Pro through the native
+On this machine (RTX 4070, Vulkan 1.4, Xbox controller) `tools\build.ps1 -Run` runs Dragon's Crown Pro through the native
 loader and the shadPS4-derived video core at a steady 60 FPS. Observed, with one scripted Cross press:
 
 1. `Create save data? / This game handles autosave.` (game-drawn prompt; press Cross / Xbox A)
 2. CRIWARE logo, the opening movie, then the **title screen** (`Press ✕ button`, `©ATLUS ©SEGA`), stable.
 
-Not verified: anything past the title screen. Known visual defects, not investigated: a missing glyph in the save prompt
-(`Cre te`) and stale rectangular patches during the opening movie and the smoke around the title logo.
+Not verified: anything past the title screen. The visual defects seen here (flicker, stale rectangles, a missing glyph) were
+fixed in `feature/graphics-correctness`, see [GRAPHICS.md](GRAPHICS.md).
 
 ## Blockers in the order they were hit
 
@@ -26,7 +26,7 @@ Not verified: anything past the title screen. Known visual defects, not investig
 Event queues come from the video core (`ndcgpu_register_kernel` equivalent), so no second event model exists.
 NpToolkit2 initialises without any Np import being reached; Rudp, NpTus, NpMatching2 were never reached.
 Audio (WASAPI via SDL3) and the pad (Xbox One S) initialise with the existing runtime. Imports still missing in the image
-(`tools\run.ps1 -CheckImports`): 114, none reached so far.
+(`tools\build.ps1 -Run -CheckImports`): 114, none reached so far.
 
 ## Video core
 
@@ -48,7 +48,5 @@ see the first-run prompt again.
 ## Commands
 
 ```powershell
-tools\prepare-game.ps1 -Scope full   # once; CPKs must be present
-tools\build.ps1
-tools\run.ps1 -TimeoutSeconds 0      # log: user\last_run.log; Cross = A on an Xbox pad, Enter or the key map otherwise
+tools\build.ps1 -Run   # prepares the game on the first run; log: build\logs\dragons_crown_pro_NNN.log; Cross = A on an Xbox pad, Enter or the key map otherwise
 ```

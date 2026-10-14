@@ -11,6 +11,7 @@
 #include "dcpgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
@@ -62,7 +63,15 @@ static size_t reads;
 static uint8_t connected_count;
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
-static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+#define STICK_DEADZONE 0.10f
+static uint8_t axis(int16_t v) {
+    float f=(float)v/32767.f;
+    if (f>1) f=1;
+    if (f<-1) f=-1;
+    f=fabsf(f)<=STICK_DEADZONE ? 0.f : (f>0 ? f-STICK_DEADZONE : f+STICK_DEADZONE)/(1.f-STICK_DEADZONE);
+    int x=(int)lroundf(f*127.5f+127.5f);
+    return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x);
+}
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));

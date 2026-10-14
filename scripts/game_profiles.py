@@ -25,7 +25,7 @@ PROFILES = {
         # What the loader needs; the game data (DRACRO*.CPK) is only unpacked with --scope full.
         'core_patterns': ('eboot.bin', 'sce_module/*', 'sce_sys/*', '*.plt'),
         # Video core defaults (its variables keep the upstream GOW3_ prefix): no temporal upscaler hooks,
-        # linear readbacks avoid black surfaces, PS4 VBlank is 60 Hz. Not exercised before first boot.
+        # linear readbacks avoid black surfaces, PS4 VBlank is 60 Hz.
         'env': {'GOW3_UPSCALER': 'none', 'GOW3_READBACK_LINEAR': '1', 'GOW3_VBLANK_HZ': '60'},
     },
 }

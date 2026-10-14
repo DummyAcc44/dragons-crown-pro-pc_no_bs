@@ -1,13 +1,14 @@
 """Run the loader on a prepared image and keep a log of the run.
 
 Usage: python scripts/run_game.py [--version 1.03] [--loader PATH] [--check-imports] [--timeout SECONDS] [--log FILE] [-- loader args]
-Everything the loader prints goes to the console and to user/last_run.log (the previous log is
-kept as last_run.prev.log).
+Everything the loader prints goes to the console and to build/logs/dragons_crown_pro_NNN.log
+(the next free number).
 """
 import argparse
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +26,11 @@ def find_loader():
     return candidates[-1] if candidates else None
 
 
+def next_log(folder):
+    numbers = [int(m.group(1)) for f in folder.glob('dragons_crown_pro_*.log') if (m := re.fullmatch(r'dragons_crown_pro_(\d+)\.log', f.name))]
+    return folder / f'dragons_crown_pro_{max(numbers, default=0) + 1:03d}.log'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--version', default='1.03')
@@ -40,15 +46,15 @@ def main():
     image = ROOT / 'build' / 'image' / f'v{args.version}'
     loader = args.loader or find_loader()
     if not (image / 'boot.bin').is_file():
-        sys.exit(f'No boot image for {args.version}: run tools/prepare-game.ps1 -Version {args.version}')
+        sys.exit(f'No boot image for {args.version}: run tools/build.ps1')
     if not loader or not loader.is_file():
         sys.exit('No dcp-loader.exe: run tools/build.ps1')
 
     user = args.user_dir
     user.mkdir(parents=True, exist_ok=True)
-    log = args.log or user / 'last_run.log'
-    if log.is_file():
-        os.replace(log, log.with_name(log.stem + '.prev' + log.suffix))
+    log = args.log or next_log(ROOT / 'build' / 'logs')
+    log.parent.mkdir(parents=True, exist_ok=True)
+    print(f'Log: {log}')
     command = [str(loader), str(image / 'boot.bin'), '--content-profile', str(image / 'content.bin'),
                '--app0', str(view), '--user', str(user)]
     if args.check_imports:
@@ -78,7 +84,7 @@ def main():
         except (OSError, KeyError, ValueError) as error:
             emit(f'[run] image.json unreadable: {error}')
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, cwd=ROOT, env=env)
+                                   stderr=subprocess.STDOUT, cwd=loader.parent, env=env)
         timer = threading.Timer(args.timeout, process.kill) if args.timeout else None
         if timer:
             timer.start()
