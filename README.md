@@ -12,9 +12,7 @@
 
 </div>
 
-<!-- SAULO: replace this comment with the main gameplay screenshot (a GitHub user-attachments URL), as in the other ports:
-<img width="1920" height="1080" alt="gameplay" src="https://github.com/user-attachments/assets/REPLACE-ME" />
--->
+<img width="1941" height="1156" alt="2026-10-14_23-43" src="https://github.com/user-attachments/assets/984433e5-1bd8-498a-949c-68815e73b901" />
 
 ## Features
 
@@ -131,13 +129,11 @@ The game runs at its own 60 frames per second.
 - Open the game folder, the saves and settings folder, or the logs folder
 - **Show settings file**, and **Reset all settings**
 
-<!-- SAULO: uncomment and fill in with one or two screenshots (GitHub user-attachments URLs), as in the other ports.
 ## Screenshots
 
-<img width="1920" height="1080" alt="screenshot_1" src="https://github.com/user-attachments/assets/REPLACE-ME" />
+<img width="1962" height="1170" alt="2026-10-14_23-45" src="https://github.com/user-attachments/assets/91c30616-e700-478f-a56b-c286344e6502" />
+<img width="1935" height="1161" alt="2026-10-14_23-44_1" src="https://github.com/user-attachments/assets/3f9fbc08-a505-4caa-8346-d5560b82d94d" />
 
-<img width="1920" height="1080" alt="screenshot_2" src="https://github.com/user-attachments/assets/REPLACE-ME" />
--->
 
 ## Reporting problems
 
