@@ -34,7 +34,7 @@ Audio (WASAPI via SDL3) and the pad (Xbox One S) initialise with the existing ru
 does not import it), `ndcgpu` renamed `dcpgpu`, `ndc_setjmp` → `dcp_setjmp`, `ndc.ini` → `dcp.ini`. `sirit`, `gcn`, `half`
 and the font are vendored; `imgui`, `magic_enum`, `miniz`, `xbyak` are fetched at the pinned commits of `gpu/deps.txt`
 by `tools\build.ps1` and git-ignored. The inherited `gow3_*` shim names and `GOW3_*` switches were renamed or removed in the
-release review (docs/GRAPHICS.md). The first run compiles shaders on demand (no pipeline cache yet).
+release review (docs/GRAPHICS.md). The first run compiles shaders on demand; later runs reuse them from `user\cache`.
 
 ## Saves
 

@@ -56,7 +56,8 @@ sources (`gpu/deps.txt`), about twenty MSYS2 packages. Vendored in phase 2 once 
 | medievil_pc | (via uncharted) PKG/profile/import-name scripts; `tools/aerolib.inl` used as the NID→name source for `gen_import_names.py`; imported as evidence for NpToolkit2 handling (`runtime_extra.c`) |
 | gow3_pc | (via uncharted) loader and runtime architecture; GPU lineage |
 | gr2_pc / tlg_pc | Evidence only: `sceLibcHeapGetTraceInfo` (`runtime_tlg.c`), libSceFont/FontFt on FreeType (`runtime_gr2_font.c`) |
-| bloodborne_pc_windows | Not used |
+| bloodborne_pc_windows | The approach of its generic anisotropic sampler override, without its title hooks (texture filtering) |
+| shadPS4 `d339b3f7` | The PKG extractor (`pkg.cpp`, `pfs.h`, `pkg_type.cpp`, `src/core/crypto`) as it was before `be22674f` removed it, adapted as `launcher/pkg_extract.cpp` with Windows CNG in place of Crypto++ |
 
 Not taken: Uncharted specifics (CUSA02320, `big2`/`big3`, LoadExec switching, `u*data`, offsets, hashes, `NDC_`), GoW
 cheats/patches/signatures/launcher/upscalers, MediEvil's UE4 override, HayatoG hooks and per-game runtimes.

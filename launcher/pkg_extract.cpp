@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Adapted from shadPS4 d339b3f7 (the parent of be22674f, which removed it); see pkg_extract.h.
 #include "pkg_extract.h"
 
 #ifndef NOMINMAX

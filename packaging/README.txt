@@ -1,38 +1,96 @@
-Dragon's Crown Pro PC @VERSION@
+Dragon's Crown Pro - PC port
+Version @VERSION@
 
-Dragon's Crown Pro running natively on Windows: the PS4 game's own code runs on the PC with a replacement for the PS4
-system libraries and a Vulkan renderer. No game files are included: you need your own legally obtained copy.
+Dragon's Crown Pro for PlayStation 4, running natively on Windows: the game's
+own code runs on the PC with a replacement for the PS4 system libraries and a
+Vulkan renderer.
 
-Requirements
-  - Windows 10 version 1903 or later, or Windows 11, 64-bit
-  - A graphics card and driver with Vulkan 1.3, VK_EXT_robustness2, VK_KHR_push_descriptor and
-    VK_EXT_vertex_attribute_divisor
-  - Your own Dragon's Crown Pro package: a decrypted (fake) PS4 .pkg file, CUSA10454, version 01.03
-  - About 6 GB of free space for the installed game
+Source code and issue tracker:
+https://github.com/saulob/dragons-crown-pro-pc
 
-Installing
-  1. Run dcp-loader.exe. The launcher opens.
-  2. On the Play page, click Install game... and select your Dragon's Crown Pro .pkg file.
-  3. Wait until Ready to play appears, then press PLAY.
-  The package is unpacked into the game folder next to the program; the .pkg file is only read and can be deleted
-  afterwards. Reinstall game... keeps your settings and saves.
 
-Playing
-  Insert (or R3 + L2 on a controller): in-game settings menu.
-  F11: Windowed / Borderless Fullscreen.
-  Turn the launcher off on the Play page; hold Shift while starting to bring it back.
+NO GAME FILES ARE INCLUDED
+--------------------------
+You need your own legally obtained copy of the game: a decrypted Dragon's
+Crown Pro PS4 package (.pkg). This port only runs this exact release:
 
-Your files
-  user\   settings (dcp.ini), saves (savedata) and the shader cache (cache), created on first use
-  logs\   one log per run; attach the newest one when reporting a problem
-  game\   the installed game
+  Title ID:      CUSA10454
+  Version:       01.03 (APP_VER 01.00)
 
-Windows may warn the first time you run the program, because it is not digitally signed: choose More info, then
-Run anyway.
+Any other version is refused with "Different version of Dragon's Crown Pro".
+A package still encrypted for a PS4 console cannot be unpacked on a PC.
 
-Licence
-  GNU GPL v2 or later (LICENSE.txt). Source code: https://github.com/saulob/dragons-crown-pro-pc
-  Third-party notices: licenses\THIRD-PARTY-LICENSES.txt
 
-Unofficial fan-made port, not affiliated with or endorsed by Vanillaware, Atlus, SEGA or Sony Interactive
-Entertainment.
+REQUIREMENTS
+------------
+- Windows 10 version 1903 or later, or Windows 11, 64-bit
+- A graphics card and driver with Vulkan 1.3, VK_EXT_robustness2,
+  VK_KHR_push_descriptor and VK_EXT_vertex_attribute_divisor
+- Your own Dragon's Crown Pro package, plus about 6 GB of free disk space next
+  to the program for the installed game
+- Nothing else: no Python or other tools are needed
+
+
+INSTALL
+-------
+1. Extract the ZIP anywhere you can write to (not "Program Files").
+2. Run dcp-loader.exe. The launcher opens.
+3. On the Play page, click "Install game...".
+4. Select your Dragon's Crown Pro .pkg file.
+5. Wait while the launcher checks the package and unpacks it into the "game"
+   folder next to the program. The .pkg file is only read and can be deleted
+   afterwards.
+6. When the Play page says "Ready to play", press PLAY.
+
+To repair the game files, use "Reinstall game..." on the Play page. Your
+settings and saves are kept. If an installation fails or is cancelled, the
+previous one is left as it was.
+
+
+WINDOWS SMARTSCREEN
+-------------------
+The first time you run dcp-loader.exe, Windows SmartScreen may show a warning,
+because the program is not digitally signed. If you downloaded the release
+from the project's GitHub releases page, choose "More info", then
+"Run anyway".
+
+
+PLAYING
+-------
+- F11 switches between Windowed and Borderless Fullscreen.
+- Insert (or R3 + L2 on a controller) opens the in-game settings menu.
+- Xbox controllers work without setup.
+- The keyboard works too; the launcher's Controls page lists the keys.
+- One player: local multiplayer and online play are not supported.
+- To open the launcher again after turning it off, hold Shift while starting.
+
+
+WHERE THINGS ARE
+----------------
+- Game files:     the "game" folder next to dcp-loader.exe
+- Logs:           the "logs" folder next to dcp-loader.exe
+- Settings (dcp.ini), saves and shader cache:
+                  the "user" folder next to dcp-loader.exe
+
+These folders are created when they are first needed and are not part of the
+download. When updating the port, keep "user" (and "game", to skip
+reinstalling).
+
+If the game does not start or crashes, please attach the newest
+dragons_crown_pro_*.log file from the "logs" folder to a report at
+https://github.com/saulob/dragons-crown-pro-pc/issues
+
+
+LICENSE
+-------
+The original project code of this port is licensed under the GNU General
+Public License v2.0 or later (GPL-2.0-or-later). The full text is in
+LICENSE.txt.
+
+Third-party components keep their own licenses. Their license files and
+notices are in the "licenses" folder, starting with THIRD-PARTY-LICENSES.txt.
+
+Game files are not included and are not covered by this project's license.
+This port is not affiliated with or endorsed by Vanillaware, Atlus, SEGA,
+Sony Interactive Entertainment or any other rights holder of Dragon's Crown
+Pro.

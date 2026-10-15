@@ -10,9 +10,16 @@ lists the exact version and source package of every DLL that ships next to dcp-l
 Compiled into dcp-loader.exe
 ========================================================================
 
-shadPS4 (b4e7ae776071ceb1dd35004577a8719481e1d258 plus backports)
+shadPS4
   https://github.com/shadps4-emu/shadPS4
   GPL-2.0-or-later. Copyright the shadPS4 Emulator Project; file headers carry SPDX tags.     licenses\shadPS4
+  - The video core, shader recompiler and GPU command processing: commit
+    b4e7ae776071ceb1dd35004577a8719481e1d258 plus backported fixes (gpu/VENDOR.txt of the source).
+  - The game installer's PS4 package extractor (launcher/pkg_extract.cpp of the source), adapted from
+    src/core/file_format/pkg.cpp, pfs.h, pkg_type.cpp and src/core/crypto at
+    d339b3f7d663ba89bb5b3cd572ead77b41b0f0a8, the last revision before upstream commit
+    be22674f8c1ac84e1cff89947ff4a6753070f21b ("code: Remove fpkg code") removed them. Modified: Windows CNG
+    (bcrypt, part of Windows) in place of Crypto++, 64-bit file sizes and bounds checks.
 
 sirit                       BSD-3-Clause. Copyright (c) 2019, sirit.                             licenses\sirit
 SPIRV-Headers               MIT-style Khronos licence. Copyright 2015-2024 The Khronos Group.    licenses\SPIRV-Headers
@@ -128,6 +135,4 @@ Modified to use the launcher accent color and a lighter tint of it (shape unchan
 rgb(144,224,239) became #E0BB32 and #F2E3AA. packaging/icons/app-icon.svg is the only copy kept.
 The ICO and PNG icon files are renderings of the modified SVG (tools/make-app-icon.py).
 
-License: not established. The sibling project geometry-wars-retro-evolved-2-recompiled records this icon as
-svgrepo.com/svg/425126, collection "Ecommerce Duotone Filled Icons", license CC0, but that page could not be read to
-confirm it (HTTP 429). Confirm the licence on that page, or replace the icon, before a public release.
+License: CC0, as svgrepo.com/svg/425126, collection "Ecommerce Duotone Filled Icons".

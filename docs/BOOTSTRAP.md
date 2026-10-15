@@ -27,7 +27,7 @@ unresolved import stops the process (exit 20) with its name and caller.
 
 | | |
 |---|---|
-| Package | `game\Dragons.Crown.Pro.PS4-DUPLEX.pkg`, 5,839,257,600 B (header agrees), the only file |
+| Package | A fake PKG of the game in `game\`, 5,839,257,600 B (header agrees), the only file |
 | Title / title ID | Dragon's Crown Pro / **CUSA10454** |
 | Content ID | `UP2611-CUSA10454_00-DRAGONSCROWNPRO1` |
 | Category | `gd` (base game); fake PKG (image key index 3), no delta info |

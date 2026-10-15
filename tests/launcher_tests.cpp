@@ -656,9 +656,16 @@ void TestInstaller(const fs::path& base) {
     fs::remove(target.app0 / "game.pkg");
     CHECK(unchanged());
 
-    // The real package, when the development tree has it: cancelled during unpacking, nothing changes.
-    const fs::path real = fs::path(DCP_SOURCE_DIR) / "game" / "Dragons.Crown.Pro.PS4-DUPLEX.pkg";
-    if (fs::exists(real)) {
+    // The real package, when the development tree's game folder has one: cancelled during unpacking, nothing changes.
+    fs::path real;
+    std::error_code ec;
+    for (const fs::directory_entry& entry : fs::directory_iterator(fs::path(DCP_SOURCE_DIR) / "game", ec)) {
+        if (entry.path().extension() == ".pkg") {
+            real = entry.path();
+            break;
+        }
+    }
+    if (!real.empty()) {
         InstallHooks cancel_unpacking;
         bool unpacking = false;
         cancel_unpacking.progress = [&](uint64_t done, uint64_t) { return !(unpacking = done > 0); };

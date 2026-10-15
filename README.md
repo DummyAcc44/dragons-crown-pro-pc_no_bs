@@ -2,26 +2,28 @@
 
 # Dragon's Crown Pro - PC Port
 
-### Dragon's Crown Pro running natively on Windows through a PS4-to-PC native port and runtime, with the TRG launcher and modern PC graphics and display options
+### Dragon's Crown Pro running natively on Windows through a PS4-to-PC port and runtime, with the TRG launcher and modern PC graphics and display options
 
 [![Latest release](https://img.shields.io/github/v/release/saulob/dragons-crown-pro-pc?style=for-the-badge&label=release&color=e0bb32&labelColor=07101f&include_prereleases&cacheSeconds=300)](https://github.com/saulob/dragons-crown-pro-pc/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/saulob/dragons-crown-pro-pc/total?style=for-the-badge&color=e0bb32&labelColor=07101f&cacheSeconds=300)](https://github.com/saulob/dragons-crown-pro-pc/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows-00acc1?style=for-the-badge&labelColor=07101f)
 
-<sub>The original PS4 game code runs on the PC with a replacement for the PS4 system libraries and a Vulkan renderer derived from <a href="https://github.com/shadps4-emu/shadPS4">shadPS4</a>. <b>No game files included</b>: bring your own legally obtained Dragon's Crown Pro game files.</sub>
+<sub>The original PS4 game code runs on the PC with a replacement for the PS4 system libraries and a Vulkan renderer derived from <a href="https://github.com/shadps4-emu/shadPS4">shadPS4</a>. <b>No game files included</b>: bring your own legally obtained Dragon's Crown Pro PS4 package.</sub>
 
 </div>
 
-<!-- Screenshot: add the title screen image here (a GitHub user-attachments URL), as in the other ports. -->
+<!-- SAULO: replace this comment with the main gameplay screenshot (a GitHub user-attachments URL), as in the other ports:
+<img width="1920" height="1080" alt="gameplay" src="https://github.com/user-attachments/assets/REPLACE-ME" />
+-->
 
 ## Features
 
 - **Native Windows PC port**: the game's own x86-64 code runs directly on the PC. It is not an emulator.
-- **TRG launcher** that installs the game from your own `.pkg` file and remembers its window position
+- **TRG launcher** that installs the game directly from your own `.pkg` file, with no Python or other tools needed, and remembers its window position
 - **Windowed** and **Borderless Fullscreen**, switched with **F11** while playing, with window size and monitor selection
 - **Graphics card selection**: Automatic, or any Vulkan graphics card the renderer can use
 - **VSync** on or off
-- **Render resolution**: Native 1920×1080, 854×480, 1280×720, 2560×1440, 3200×1800 or 3840×2160 (4K)
+- **Render resolution** from 480p to 4K (3840×2160), with the game's native 1080p as the default
 - **SMAA** anti-aliasing and **anisotropic texture filtering** (Game, 2x, 4x, 8x, 16x)
 - **AMD FidelityFX Super Resolution 1** upscaling and **RCAS sharpening** with a strength setting
 - Frame rate in the window title, and an in-game **frame counter** (frames per second and frame time)
@@ -33,7 +35,7 @@
 
 - Windows 10 (version 1903 or newer) or Windows 11, 64-bit
 - A graphics card and driver with **Vulkan 1.3**, `VK_EXT_robustness2`, `VK_KHR_push_descriptor` and `VK_EXT_vertex_attribute_divisor` (tested on an NVIDIA GeForce RTX 4070 and Intel UHD Graphics 730)
-- **Your own legally obtained Dragon's Crown Pro package**: a decrypted (fake) PS4 `.pkg` file of this exact game version, and about 6 GB of free space for the installed game:
+- **Your own legally obtained Dragon's Crown Pro package**: a decrypted PS4 `.pkg` file of this exact game version, and about 6 GB of free space for the installed game:
 
 | | |
 | --- | --- |
@@ -51,8 +53,8 @@ The launcher checks the Title ID, Content ID and versions in the package's `para
 
 1. Download **DragonsCrownProPC-v0.1.0-windows-x64.zip** from the [latest release](https://github.com/saulob/dragons-crown-pro-pc/releases/latest) and extract it anywhere you can write to.
 2. Run **dcp-loader.exe**. The launcher opens.
-3. On the **Play** page click **Install game...** and select your Dragon's Crown Pro `.pkg` file.
-4. Wait until **Ready to play** appears. The package is unpacked into the `game` folder next to the program (about 6 GB, under a minute on an SSD). The `.pkg` file is only read, and you can delete it afterwards.
+3. On the **Play** page click **Install game...** and select your own Dragon's Crown Pro `.pkg` file.
+4. Wait until **Ready to play** appears. The package is unpacked on your PC into the `game` folder next to the program (about 6 GB). The `.pkg` file is only read, and you can delete it afterwards.
 5. Press **PLAY**.
 
 **No game files are included** in the release, and the port does not download the game.
@@ -122,11 +124,20 @@ The game runs at its own 60 frames per second.
 | Touchpad left / right (Back) | Tab / Backspace |
 
 - **F11** switches Windowed and Borderless Fullscreen. **Insert** (or **R3 + L2**) opens the in-game menu, with the display mode, VSync, FSR 1, sharpening and the frame counter.
+- One player: local multiplayer and online play are not supported.
 
 ### About
 - The port version, game version, renderer and library versions
 - Open the game folder, the saves and settings folder, or the logs folder
 - **Show settings file**, and **Reset all settings**
+
+<!-- SAULO: uncomment and fill in with one or two screenshots (GitHub user-attachments URLs), as in the other ports.
+## Screenshots
+
+<img width="1920" height="1080" alt="screenshot_1" src="https://github.com/user-attachments/assets/REPLACE-ME" />
+
+<img width="1920" height="1080" alt="screenshot_2" src="https://github.com/user-attachments/assets/REPLACE-ME" />
+-->
 
 ## Reporting problems
 
@@ -134,17 +145,23 @@ If the game does not start or crashes, please open an [issue](https://github.com
 
 ## Building it yourself
 
+```powershell
+git clone https://github.com/saulob/dragons-crown-pro-pc.git
+```
+
 1. Install [MSYS2](https://www.msys2.org) with the CLANG64 toolchain. `.\tools\setup.ps1` checks it and prints the `pacman` command for anything missing.
-2. Clone the repository. `.\tools\build.ps1` fetches the pinned dependencies (TRG Launcher, Dear ImGui and a few small libraries) and builds `build\cmake\clang64\bin\dcp-loader.exe`.
+2. `.\tools\build.ps1` fetches the pinned dependencies (TRG Launcher, Dear ImGui and a few small libraries) and builds `build\cmake\clang64\bin\dcp-loader.exe`.
 3. `.\tools\build.ps1 -Run` also starts it. Install the game from the launcher's Play page, as in a release; the development build keeps it in `game\` and the boot image in `build\image\` of the repository.
 4. `.\tools\package.ps1` makes the release folder, ZIP and `.sha256` file in `dist\` from the same build: the program without debug information (the symbols stay in `dist\`), the DLLs it needs and the licences. It is local only and never uploads, tags or publishes anything. The release version is `DCP_PORT_VERSION` in `CMakeLists.txt`.
 
-`.\tools\test.ps1` runs the focused tests. The technical notes are in [docs](docs): [launcher and settings](docs/LAUNCHER.md), [graphics](docs/GRAPHICS.md), [first boot](docs/FIRST_BOOT.md), [bootstrap](docs/BOOTSTRAP.md) and [references](docs/REFERENCES.md).
+`.\tools\test.ps1` runs the focused tests. Python is not needed to build, test or play. Only the optional development scripts in `scripts\` use it, such as the Python cross-checks of the package extractor and the boot image builder (`.\tools\setup.ps1 -InstallPython`).
+
+The technical notes are in [docs](docs): [launcher and settings](docs/LAUNCHER.md), [graphics](docs/GRAPHICS.md), [first boot](docs/FIRST_BOOT.md), [bootstrap](docs/BOOTSTRAP.md) and [references](docs/REFERENCES.md).
 
 ## Credits
 
 - Dragon's Crown Pro by Vanillaware, published by Atlus (2018). This is an unofficial fan-made PC port. It is not affiliated with or endorsed by Vanillaware, Atlus, SEGA, Sony Interactive Entertainment or any other rights holder, and it contains none of their files.
-- [shadPS4](https://github.com/shadps4-emu/shadPS4) for the Vulkan renderer, shader recompiler and GPU command processing the video core is built on, and for the PKG extractor the installer is adapted from (GPL-2.0-or-later)
+- [shadPS4](https://github.com/shadps4-emu/shadPS4) for the Vulkan renderer, shader recompiler and GPU command processing the video core is built on, and for the PS4 package extractor the installer is adapted from, as it was before upstream commit `be22674f` removed it (GPL-2.0-or-later)
 - [gow3_pc](https://github.com/FelipePrado0/gow3_pc) and its lineage, uncharted-ndc-native, MediEvil PC and the HayatoG ports, for the loader, runtime and video core this port grew from (see [docs/REFERENCES.md](docs/REFERENCES.md))
 - [bloodborne_pc_windows](https://github.com/Phroster/bloodborne_pc_windows) for the anisotropic filtering approach
 - [SMAA](https://github.com/iryoku/smaa) by Jorge Jimenez et al., and AMD FidelityFX Super Resolution 1
