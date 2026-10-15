@@ -10,8 +10,8 @@
 #include <bit>
 #include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
-#include "gow3_copy.h"
-#include "gow3_toggles.h"
+#include "dcp_copy_pool.h"
+#include "dcp_toggles.h"
 #include "common/alignment.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -111,13 +111,12 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     });
 }
 
-// gow3: the game fills its per-frame buffers (constants, skinning output) sequentially and
-// every 4 KiB page cost a protection fault (~110k/s in the test scene, a fifth of each
-// render worker's time in the kernel). A fault unprotects the aligned window around it instead;
-// pages marked CPU-modified without being written only cost an upload when bound.
+// dcp: games fill their per-frame buffers (constants, skinning output) sequentially, and a
+// protection fault per 4 KiB page is expensive. A fault unprotects the aligned window around it
+// instead; pages marked CPU-modified without being written only cost an upload when bound.
 // Item: context = BufferCache, source = guest address, destination = host pointer, size,
 // extra = the Buffer whose mapping holds the destination (flushed after the copy).
-void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
+void BufferCache::RunGuestCopy(const DcpCopyPool::Item& item) {
     auto* cache = static_cast<BufferCache*>(item.context);
     auto* dst = reinterpret_cast<u8*>(item.destination);
     cache->memory->CopySparseMemory(item.source, dst, item.size);
@@ -127,29 +126,25 @@ void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
 
 // Small guest copies run on the recording thread (it spins for work: no wakeup, and it is
 // idle most of the time); PoolSmallCopies (toggle 524288) batches them for the copy threads.
-void BufferCache::SmallGuestCopy(const Gow3Copy::Item& item) {
+void BufferCache::SmallGuestCopy(const DcpCopyPool::Item& item) {
     // Only the recording thread may Record() or use its copy batch. A draw preparation worker
     // obtaining a buffer copies at once, before the buffer is returned: recording from a worker
-    // while the GPU thread handed its chunk to the recorder wrote into a null chunk (crash in
-    // SmallGuestCopy, MediEvil), and a worker's thread-local copy batch could stay unflushed.
+    // while the GPU thread handed its chunk to the recorder writes into a null chunk, and a
+    // worker's thread-local copy batch could stay unflushed.
     if (!scheduler.OwnsRecording() && scheduler.IsRecordingDeferred()) {
         item.run(item);
         return;
     }
-    if (scheduler.IsRecordingDeferred() && !Gow3Toggle::Disabled(Gow3Toggle::PoolSmallCopies)) {
+    if (scheduler.IsRecordingDeferred() && !DcpToggle::Disabled(DcpToggle::PoolSmallCopies)) {
         scheduler.RecordHostCopy([item] { item.run(item); });
         return;
     }
-    Gow3Copy::QueueCopy(item);
+    DcpCopyPool::QueueCopy(item);
 }
 
 void BufferCache::ExtendWriteFault(VAddr device_addr) {
-    static const u64 window = [] {
-        const char* env = std::getenv("GOW3_FAULT_WINDOW");
-        const u64 kib = env ? std::strtoull(env, nullptr, 10) : 256;
-        return std::bit_ceil(std::clamp<u64>(kib, 4, 1024)) * 1024;
-    }();
-    if (window <= TRACKER_BYTES_PER_PAGE || Gow3Toggle::Disabled(Gow3Toggle::FaultWindow)) {
+    static constexpr u64 window = 256 * 1024;
+    if (window <= TRACKER_BYTES_PER_PAGE || DcpToggle::Disabled(DcpToggle::FaultWindow)) {
         return;
     }
     memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
@@ -221,107 +216,15 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
 }
 
-namespace {
-// gow3: GOW3_BUFFER_STATS=1 — how buffer bindings reach the GPU, by guest region (256 MiB),
-// printed every 5 s: small read-only copies into the stream buffer, arena bindings, and the
-// bytes those re-upload after CPU writes. Input for engine-level short paths.
-struct BufferStats {
-    struct Region {
-        u64 stream_count{}, stream_bytes{}, arena_count{}, arena_bytes{}, upload_bytes{};
-    };
-    std::map<u64, Region> regions;
-    /// Hot window: frame of the last binding per 64 KiB block, and the distribution of the
-    /// frames between uses (1, 2, 3, 4, 5-8, 9-16, 17+): the ring's reuse distance.
-    std::unordered_map<u64, u64> last_use;
-    std::array<u64, 7> reuse{};
-    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
-    u64 calls = 0;
-};
-/// 256 MiB regions; 1 MiB inside the hot 0x104xxxxxxx window (the engine's frame data).
-BufferStats& Stats();
-void NoteHotUse(VAddr address, u32 size) {
-    if ((address >> 28) != 0x104) {
-        return;
-    }
-    auto& st = Stats();
-    const u64 frame = Gow3Stats::gpu_frames.load(std::memory_order_relaxed);
-    for (u64 block = address >> 16; block <= (address + size - 1) >> 16; ++block) {
-        auto [it, inserted] = st.last_use.try_emplace(block, frame);
-        if (!inserted && it->second != frame) {
-            const u64 d = frame - it->second;
-            ++st.reuse[d <= 4 ? d - 1 : d <= 8 ? 4 : d <= 16 ? 5 : 6];
-            it->second = frame;
-        }
-    }
-}
-u64 RegionKey(VAddr address) {
-    return (address >> 28) == 0x104 ? (address >> 20) | (1ull << 40) : address >> 28;
-}
-bool BufferStatsEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("GOW3_BUFFER_STATS");
-        return value && value[0] == '1';
-    }();
-    return enabled;
-}
-BufferStats& Stats() {
-    static BufferStats stats;
-    return stats;
-}
-void PrintBufferStats() {
-    auto& st = Stats();
-    if ((++st.calls & 4095) != 0) {
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    const double seconds = std::chrono::duration<double>(now - st.window).count();
-    if (seconds < 5.0) {
-        return;
-    }
-    std::printf("Buffer stats (%.1f s, per second): region, stream copies/bytes, arena bindings, "
-                "re-uploaded bytes\n", seconds);
-    std::printf("  hot window reuse distance in frames (1,2,3,4,5-8,9-16,17+): %llu %llu %llu %llu "
-                "%llu %llu %llu\n",
-                (unsigned long long)st.reuse[0], (unsigned long long)st.reuse[1],
-                (unsigned long long)st.reuse[2], (unsigned long long)st.reuse[3],
-                (unsigned long long)st.reuse[4], (unsigned long long)st.reuse[5],
-                (unsigned long long)st.reuse[6]);
-    st.reuse = {};
-    for (const auto& [region, r] : st.regions) {
-        const u64 base = (region >> 40) ? (region & ((1ull << 40) - 1)) << 20 : region << 28;
-        if ((region >> 40) && r.stream_bytes + r.upload_bytes < 1e6 * seconds) {
-            continue; // quiet MiB of the hot window
-        }
-        std::printf("  %#012llx: %8.0f copies %8.2f MB, %8.0f arena %8.2f MB bound, %8.2f MB uploads\n",
-                    static_cast<unsigned long long>(base), r.stream_count / seconds,
-                    r.stream_bytes / seconds / 1e6, r.arena_count / seconds,
-                    r.arena_bytes / seconds / 1e6,
-                    r.upload_bytes / seconds / 1e6);
-    }
-    st.regions.clear();
-    st.window = now;
-}
-} // namespace
-
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
-    const bool stats = BufferStatsEnabled();
-    if (stats) {
-        PrintBufferStats();
-        NoteHotUse(device_addr, size);
-    }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
-        if (stats) {
-            auto& region = Stats().regions[RegionKey(device_addr)];
-            ++region.stream_count;
-            region.stream_bytes += size;
-        }
-        // gow3: the guest data is copied on a copy thread, started now; submission and
+        // dcp: the guest data is copied on a copy thread, started now; submission and
         // guest-visible fences wait for it (Scheduler::WaitHostCopies).
         if (!stream_buffer.mapped_data.empty() &&
-            !Gow3Toggle::Disabled(Gow3Toggle::DeferredStreamCopies)) {
+            !DcpToggle::Disabled(DcpToggle::DeferredStreamCopies)) {
             if (const auto offset = stream_buffer.Reserve(size, instance.UniformMinAlignment())) {
                 SmallGuestCopy({
                     .run = &RunGuestCopy,
@@ -343,15 +246,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
     EnsureResident(arena, first_block, last_block);
-    const u64 uploaded_before = Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed);
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
-    if (stats) {
-        auto& region = Stats().regions[RegionKey(device_addr)];
-        ++region.arena_count;
-        region.arena_bytes += size;
-        region.upload_bytes +=
-            Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
-    }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
     }
@@ -365,12 +260,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
     }
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,
                                               instance.StorageMinAlignment());
-    if (!Gow3Toggle::Disabled(Gow3Toggle::DeferredUploads)) {
-        // gow3: texture data is copied on the copy threads (streaming: 100+ MB per frame);
+    if (!DcpToggle::Disabled(DcpToggle::DeferredUploads)) {
+        // dcp: texture data is copied on the copy threads (streaming: 100+ MB per frame);
         // the upload reads the staging only after submission, which waits for the copies.
         constexpr u64 Chunk = 1_MB;
         for (u64 offset = 0; offset < staging.size; offset += Chunk) {
-            const Gow3Copy::Item item{
+            const DcpCopyPool::Item item{
                 .run = &RunGuestCopy,
                 .context = this,
                 .source = device_addr + offset,
@@ -381,7 +276,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
             if (staging.size < Chunk) {
                 SmallGuestCopy(item);
             } else {
-                Gow3Copy::Async([item] { item.run(item); });
+                DcpCopyPool::Async([item] { item.run(item); });
             }
         }
         return {staging.buffer, staging.offset};
@@ -477,7 +372,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     if (bind_ranges.Empty()) {
         return;
     }
-    Gow3Stats::Timer timer{Gow3Stats::t_resident};
+    DcpStats::Timer timer{DcpStats::t_resident};
 
     const vk::MemoryAllocateInfo alloc_info = {
         .allocationSize = resident_blocks << block_shift,
@@ -554,12 +449,12 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
     for (const auto& copy : copies) {
         texture_cache.ResolveReadbacks(copy.dstOffset, copy.size, true, ReadbackSource::BufferUpload);
     }
-    Gow3Stats::buffer_upload_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+    DcpStats::buffer_upload_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
     const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
-    // gow3: the guest memory is copied into staging on the copy threads, started now in
+    // dcp: the guest memory is copied into staging on the copy threads, started now in
     // groups of about 1 MiB; submission and guest-visible fences wait for them
     // (Scheduler::WaitHostCopies).
-    if (!Gow3Toggle::Disabled(Gow3Toggle::DeferredUploads) && total_size_bytes < 1_MB) {
+    if (!DcpToggle::Disabled(DcpToggle::DeferredUploads) && total_size_bytes < 1_MB) {
         // Small uploads join the calling thread's batch.
         for (auto& copy : copies) {
             SmallGuestCopy({
@@ -575,7 +470,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
         }
         return staging.buffer;
     }
-    if (!Gow3Toggle::Disabled(Gow3Toggle::DeferredUploads)) {
+    if (!DcpToggle::Disabled(DcpToggle::DeferredUploads)) {
         struct HostCopy {
             VAddr source;
             u8* destination;
@@ -585,7 +480,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
         auto group = std::make_shared<Group>();
         u64 group_bytes = 0;
         const auto launch = [&] {
-            Gow3Copy::Async([group, memory = memory, staging] {
+            DcpCopyPool::Async([group, memory = memory, staging] {
                 for (const auto& copy : *group) {
                     memory->CopySparseMemory(copy.source, copy.destination, copy.size);
                 }
@@ -613,7 +508,7 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
                                  copies[i].size);
     };
     if (total_size_bytes >= 2_MB && copies.size() > 1) {
-        Gow3Copy::ParallelFor(copies.size(), copy);
+        DcpCopyPool::ParallelFor(copies.size(), copy);
     } else {
         for (std::size_t i = 0; i < copies.size(); ++i) {
             copy(i);
@@ -634,13 +529,13 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
             return true;
         } else if (*type == TextureCache::MetaType::CMask) {
-            // gow3: color images are always fully expanded on the host, so every 4-bit CMask
-            // tile code reads as 0xF (uncompressed: the color in memory is valid). MediEvil reads
-            // CMask through buffers; leaving it stale made it treat tiles as fast-cleared.
+            // dcp: color images are always fully expanded on the host, so every 4-bit CMask
+            // tile code reads as 0xF (uncompressed: the color in memory is valid). A game reading
+            // CMask through buffers would otherwise treat stale tiles as fast-cleared.
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, 0xFFFFFFFFu);
             return true;
         } else {
-            // Once per type: MediEvil reads CMask through buffers every frame.
+            // Once per type: a game can read metadata through buffers every frame.
             static std::atomic<u32> warned{0};
             const u32 bit = 1u << static_cast<u32>(*type);
             if (!(warned.fetch_or(bit) & bit)) {
@@ -649,11 +544,11 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
             }
         }
     }
-    // gow3: most texel buffers alias no image; remember misses until images change.
+    // dcp: most texel buffers alias no image; remember misses until images change.
     const u64 generation = texture_cache.RegistryGeneration();
     auto& miss = image_miss_cache[((device_addr >> 6) ^ size * 0x9E3779B1u) % image_miss_cache.size()];
     if (miss.address == device_addr && miss.size == size && miss.generation == generation &&
-        !Gow3Toggle::Disabled(Gow3Toggle::TextureBindingMemo)) {
+        !DcpToggle::Disabled(DcpToggle::TextureBindingMemo)) {
         return false;
     }
     const ImageId image_id = texture_cache.FindImageFromRange(device_addr, size);
@@ -661,7 +556,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         miss = {device_addr, size, generation};
         return false;
     }
-    // gow3: the lookups above only read what the texture binding helper leaves alone; the
+    // dcp: the lookups above only read what the texture binding helper leaves alone; the
     // copy below changes image state, so the helper finishes first.
     runtime.BeforeImageAccess();
     Image& image = texture_cache.GetImage(image_id);

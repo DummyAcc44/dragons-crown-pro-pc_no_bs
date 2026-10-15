@@ -101,13 +101,13 @@ static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; 
 static ABI int32_t disable_music_player(void) { return 0; }
 static ABI int32_t launch_browser(void) { note("SystemService: web browser request ignored (offline)"); return 0; }
 #define LOAD_EXEC_EXIT 30
-/* The PS4 replaces the process with another executable of the package: end this one and let the
- * wrapper start the requested image. */
+/* The PS4 replaces the process with another executable of the package. Dragon's Crown Pro has only
+ * the one, so the request ends the process with LOAD_EXEC_EXIT. */
 static ABI __attribute__((noreturn)) void load_exec(const char *path, char *const *argv) {
+    (void)argv;
     char host[4096]="";
     if (path) runtime_file_translate(path,host,sizeof(host));
-    printf("LoadExec: %s -> %s\n",path ? path : "(null)",host[0] ? host : "(no host file)"); /* DEBUG_SAULO */
-    for (int i=0;argv && i<32 && argv[i];++i) printf("LoadExec: argv[%d] = %s\n",i,argv[i]); /* DEBUG_SAULO */
+    printf("LoadExec: %s -> %s\n",path ? path : "(null)",host[0] ? host : "(no host file)");
     fflush(NULL);
     _exit(LOAD_EXEC_EXIT); /* no destructors: GPU and guest threads are running */
 }
@@ -257,7 +257,7 @@ static ABI int32_t error_init(void) { return dialog_init(6); }
 static ABI int32_t error_status(void) { return dialog_status(6); }
 static ABI int32_t error_term(void) { return dialog_term(6); }
 static ABI int32_t error_open(const int32_t *param) {
-    if (param) printf("[DEBUG_SAULO][ErrorDialog] error code 0x%08x\n",(unsigned)param[1]);
+    if (param) printf("Runtime: error dialog, code 0x%08x\n",(unsigned)param[1]);
     return dialog_open(6);
 }
 /* OrbisMsgDialogParam: BaseParam (48 bytes), size, mode (2 = progress bar).

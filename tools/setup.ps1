@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
-  Checks the prerequisites for building and preparing the project and says what is missing.
+  Checks the prerequisites for building the project and says what is missing.
 .PARAMETER InstallPython
-  Creates .venv and installs the one Python package the scripts need (cryptography).
+  Creates .venv and installs the one Python package tools\prepare-game.ps1 needs (cryptography). Optional: only
+  for unpacking a PKG during development; the build and the launcher do not use Python.
   Nothing else is installed by this script.
 #>
 [CmdletBinding()]
@@ -11,7 +12,7 @@ param([switch]$InstallPython)
 . (Join-Path $PSScriptRoot '_common.ps1')
 $problems = 0
 
-Write-Step 'Python (preparation scripts)'
+Write-Step 'Python (optional: tools\prepare-game.ps1 and the scripts\ tools)'
 if ($InstallPython) {
     $python = Get-Python
     if (-not $python) { Stop-Tool 'Python 3.10+ is required to create the environment: https://www.python.org/downloads/' }
@@ -26,13 +27,13 @@ if ($InstallPython) {
 }
 $python = Get-Python
 if (-not $python) {
-    Write-Bad 'Python 3 not found (https://www.python.org/downloads/)'; $problems++
+    Write-Warn 'Python 3 not found (only needed for tools\prepare-game.ps1)'
 } else {
     $version = ((& $python.Exe @($python.Args) '-I' '-c' 'import platform;print(platform.python_version())') | Select-Object -First 1).Trim()
-    if ([version]$version -lt [version]'3.10') { Write-Bad "Python $version is too old (need 3.10+)"; $problems++ }
+    if ([version]$version -lt [version]'3.10') { Write-Warn "Python $version is too old for the scripts (need 3.10+)" }
     else { Write-Ok "Python $version ($($python.Exe))" }
     if (Test-PythonModule 'cryptography') { Write-Ok 'cryptography (PKG extraction)' }
-    else { Write-Bad 'cryptography missing: run tools\setup.ps1 -InstallPython'; $problems++ }
+    else { Write-Warn 'cryptography missing (tools\setup.ps1 -InstallPython adds it for tools\prepare-game.ps1)' }
 }
 
 Write-Step 'Git'
@@ -56,12 +57,12 @@ if (-not $root) {
     }
 }
 
-Write-Step 'Game package (never modified by these tools)'
+Write-Step 'Game package (optional, never modified)'
 $gameRoot = Join-Path $script:RepoRoot 'game'
 $pkgs = @()
 if (Test-Path -LiteralPath $gameRoot) { $pkgs = @(Get-ChildItem -LiteralPath $gameRoot -Filter '*.pkg') }
 if ($pkgs.Count -gt 0) { foreach ($pkg in $pkgs) { Write-Ok ('game\{0} ({1:N1} GB)' -f $pkg.Name, ($pkg.Length / 1GB)) } }
-else { Write-Warn 'no .pkg in game\ (put your own dump there before tools\prepare-game.ps1)' }
+else { Write-Ok 'no .pkg in game\ (not needed: the launcher installs the game from a .pkg anywhere)' }
 $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($script:RepoRoot).Substring(0, 1))
 $freeGb = [math]::Round($drive.Free / 1GB)
 if ($freeGb -ge 15) { Write-Ok "$freeGb GB free on $($drive.Name): (full extraction needs about 6 GB)" }

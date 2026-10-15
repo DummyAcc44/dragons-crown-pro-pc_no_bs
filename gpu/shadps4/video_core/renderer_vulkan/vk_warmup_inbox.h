@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// gow3: helpers of the background pipeline cache warm-up (vk_pipeline_serialization.cpp).
+// dcp: helpers of the background pipeline cache warm-up (vk_pipeline_serialization.cpp).
 
 #pragma once
 
@@ -11,10 +11,6 @@
 #include <vector>
 
 namespace Vulkan {
-
-inline bool UseOnDemandPipelines(bool binary_cache, bool supported, bool capture_only) {
-    return binary_cache && supported && !capture_only;
-}
 
 /// Warm-up threads: one on four cores or fewer, otherwise all but two, at most six.
 inline unsigned WarmupThreadCount(unsigned cores) {

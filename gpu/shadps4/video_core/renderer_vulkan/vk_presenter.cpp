@@ -12,12 +12,10 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
-#include "gow3_overlay.h"
-#include "gow3_settings.h"
-#include "gow3_graphics.h"
-#include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
+#include "dcp_overlay.h"
+#include "dcp_settings.h"
+#include "dcp_graphics.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
-#include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
 
@@ -41,7 +39,7 @@
 #include <vector>
 #include <vk_mem_alloc.h>
 #ifdef MemoryBarrier
-#undef MemoryBarrier // gow3: winnt.h macro (through fmt), clashes with vk::MemoryBarrier
+#undef MemoryBarrier // winnt.h macro (through fmt), clashes with vk::MemoryBarrier
 #endif
 
 namespace Vulkan {
@@ -127,8 +125,6 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
                          dst_rect.offset.x, dst_rect.offset.y);
 }
 
-// gow3: screenshot capture and ImGui overlays removed; the port presents directly.
-
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
@@ -148,33 +144,25 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         auto fence = Check<"create present done fence">(
             device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled}));
         frame.present_done = fence;
-        free_queue.push(&frame);
+        free_queue.push_back(&frame);
     }
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     smaa_pass.Create(device, instance.GetAllocator());
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
-    Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
+    DcpOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
-    const bool binary_cache = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARIES", true) &&
-                              EmulatorSettings.IsPipelineCacheEnabled();
-    const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
-                              EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
-    if (UseOnDemandPipelines(binary_cache, instance.GetPipelineBinaryGlobalKey().keySize != 0,
-                            capture_only)) {
+    if (instance.GetPipelineBinaryGlobalKey().keySize != 0) {
         rasterizer->GetPipelineCache().StartOnDemand();
         return;
     }
 
-    // gow3: by default the cached pipelines load while the game runs (a corner note shows the
-    // progress). Otherwise rebuilding them takes up to minutes before the first game frame:
-    // show what is happening instead of a black window.
-    const char* background_warmup = std::getenv("GOW3_BACKGROUND_WARMUP");
-    if ((!background_warmup || *background_warmup != '0') &&
-        rasterizer->GetPipelineCache().StartBackgroundWarmUp()) {
+    // Without pipeline binaries the cached pipelines load while the game runs (a corner note shows
+    // the progress); when that cannot start, a loading screen shows the warm-up instead of a black window.
+    if (rasterizer->GetPipelineCache().StartBackgroundWarmUp()) {
         return;
     }
-    Gow3Overlay::SetLoading(true, 0, 0);
+    DcpOverlay::SetLoading(true, 0, 0);
     PresentLoadingFrame();
     auto last = std::chrono::steady_clock::now();
     rasterizer->GetPipelineCache().WarmUp([&](u32 done, u32 total) {
@@ -183,10 +171,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
             return;
         }
         last = now;
-        Gow3Overlay::SetLoading(true, done, total);
+        DcpOverlay::SetLoading(true, done, total);
         PresentLoadingFrame();
     });
-    Gow3Overlay::SetLoading(false, 0, 0);
+    DcpOverlay::SetLoading(false, 0, 0);
 
 }
 
@@ -276,11 +264,19 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
 }
 
 Frame* Presenter::PrepareLastFrame() {
-    if (last_submit_frame == nullptr) {
-        return nullptr;
+    // dcp: the last frame is already back in the free queue. It is taken out while it is shown again, or the GPU
+    // thread could draw into it or recreate it (a window size change) under the present thread. When the GPU
+    // thread has taken it already, a new frame is on its way and nothing is redrawn.
+    Frame* frame = nullptr;
+    {
+        std::scoped_lock lock{free_mutex};
+        const auto it = std::ranges::find(free_queue, last_submit_frame);
+        if (last_submit_frame == nullptr || it == free_queue.end()) {
+            return nullptr;
+        }
+        free_queue.erase(it);
+        frame = last_submit_frame;
     }
-
-    Frame* frame = last_submit_frame;
 
     while (true) {
         vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
@@ -312,7 +308,7 @@ Frame* Presenter::PrepareLastFrame() {
                                 .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
                                 .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                                 .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
-                                .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                                .oldLayout = vk::ImageLayout::eGeneral,
                                 .newLayout = vk::ImageLayout::eGeneral,
                                 .image = frame->image,
                                 .subresourceRange{frame_subresources}};
@@ -347,58 +343,11 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
     return {};
 }
 
-// gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
-static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
-                    vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
-                    int index) {
-    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                       .size = VkDeviceSize(w) * h * 4,
-                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-    const VmaAllocationCreateInfo alloc_ci{
-        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
-    VkBuffer buffer{};
-    VmaAllocation allocation{};
-    VmaAllocationInfo info{};
-    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
-                        &info) != VK_SUCCESS) {
-        return;
-    }
-    cmdbuf.copyImageToBuffer(image, layout, buffer,
-                             vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-                                                 .imageExtent = {w, h, 1}});
-    const char* dir = std::getenv("GOW3_DUMP_DIR");
-    char path[512];
-    std::snprintf(path, sizeof(path), "%s/%s_%03d_%ux%u.raw", dir && *dir ? dir : "out/dump", name,
-                  index, w, h);
-    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
-                                      size = buffer_ci.size, file = std::string{path}] {
-        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
-        if (FILE* f = std::fopen(file.c_str(), "wb")) {
-            std::fwrite(info.pMappedData, 1, size, f);
-            std::fclose(f);
-        }
-        vmaDestroyBuffer(allocator, buffer, allocation);
-    });
-}
-
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
-    // gow3: GOW3_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
-    // guest display buffer and presented image are written to GOW3_DUMP_DIR (default out/dump)
-    // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
-    static const char* frame_dump_trigger = std::getenv("GOW3_FRAME_DUMP_TRIGGER");
-    static int frame_dump_index = 0;
-    const bool frame_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
-    // gow3: scaled upscaler presets: the output-size display buffer drawn by the port.
-    TemporalUpscaler::Display display{};
-    const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
-    VideoCore::ImageId image_id{};
-    if (!upscaled) {
-        auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
-        image_id = texture_cache.FindImage(desc);
-        texture_cache.UpdateImage(image_id);
-    }
+    auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
+    const auto image_id = texture_cache.FindImage(desc);
+    texture_cache.UpdateImage(image_id);
 
     Frame* frame = GetRenderFrame();
 
@@ -433,52 +382,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = vk::ComponentSwizzle::eOne;
 
-    vk::ImageView image_view{};
-    vk::Extent2D image_size{};
-    if (upscaled) {
-        const auto device = instance.GetDevice();
-        image_view = Check(device.createImageView({
-            .image = display.image,
-            .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
-            .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
-                           vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
-        draw_scheduler.DeferOperation([device, image_view] { device.destroyImageView(image_view); });
-        image_size = vk::Extent2D{display.width, display.height};
-        const vk::ImageMemoryBarrier2 to_read{
-            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-            .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
-            .oldLayout = vk::ImageLayout::eGeneral,
-            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .image = display.image,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        };
-        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
-    } else {
-        auto& image = texture_cache.GetImage(image_id);
-        if (frame_dump) {
-            runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
-                            vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
-            runtime.FlushBarriers();
-            DumpRaw(instance, draw_scheduler, cmdbuf, image.GetImage(),
-                    vk::ImageLayout::eTransferSrcOptimal, image.info.size.width,
-                    image.info.size.height, "display", frame_dump_index);
-        }
-        image_view = *image.FindView(view_info).image_view;
-        image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
-        runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eFragmentShader,
-                        vk::AccessFlagBits2::eShaderRead);
-        runtime.FlushBarriers();
-    }
+    auto& image = texture_cache.GetImage(image_id);
+    vk::ImageView image_view = *image.FindView(view_info).image_view;
+    const vk::Extent2D image_size{image.info.size.width, image.info.size.height};
+    runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
-    // gow3: FSR 1, RCAS and its strength come from the in-game menu, every frame.
-    const auto& graphics = Gow3Settings::Get();
+    // SMAA, FSR 1, RCAS and its strength follow the settings every frame.
+    const auto& graphics = DcpSettings::Get();
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
@@ -488,30 +401,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
     fsr_settings.enable = graphics.fsr1;
     fsr_settings.use_rcas = graphics.rcas;
-    fsr_settings.rcas_attenuation = Gow3Graphics::RcasAttenuation(graphics.rcas_strength);
-    Gow3Settings::Get().image_width = int(image_size.width);
-    Gow3Settings::Get().image_height = int(image_size.height);
-    Gow3Settings::Get().window_width = int(frame->width);
-    Gow3Settings::Get().window_height = int(frame->height);
-    Gow3Settings::Get().rcas_applied =
+    fsr_settings.rcas_attenuation = DcpGraphics::RcasAttenuation(graphics.rcas_strength);
+    DcpSettings::Get().image_width = int(image_size.width);
+    DcpSettings::Get().image_height = int(image_size.height);
+    DcpSettings::Get().window_width = int(frame->width);
+    DcpSettings::Get().window_height = int(frame->height);
+    DcpSettings::Get().rcas_applied =
         fsr_settings.use_rcas &&
-        Gow3Graphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),
+        DcpGraphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),
                                   int(frame->width), int(frame->height));
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
 
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
-    if (frame_dump) {
-        // The presented image as the swapchain blit reads it (General after the pass).
-        const vk::MemoryBarrier2 done{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                                      .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-                                      .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                                      .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
-        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
-        DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
-                frame->width, frame->height, "output", frame_dump_index);
-        ++frame_dump_index;
-    }
 
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
@@ -519,25 +421,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     SubmitInfo info{};
     draw_scheduler.Flush(info);
 
-    // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
-    // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
-    // bottleneck it finishes frames at an even rate; without this bound the command thread ran
-    // ahead and then blocked wherever a resource ran out, so flips (and the guest's frame
-    // timing) came in bursts: 12.5/25 ms alternation at 80 FPS. 0 turns it off.
-    // The in-game menu changes it live (Gow3Settings::frames_queued; GOW3_FRAMES_AHEAD at start).
-    const u32 frames_ahead = u32(std::max(0, Gow3Settings::Get().frames_queued.load()));
-    if (!frames_ahead) {
-        recent_frame_ticks.clear();
-    } else {
-        recent_frame_ticks.push_back(frame->ready_tick);
-        while (recent_frame_ticks.size() > frames_ahead) {
-            const u64 tick = recent_frame_ticks.front();
-            recent_frame_ticks.pop_front();
-            if (recent_frame_ticks.size() == frames_ahead) {
-                draw_scheduler.Wait(tick);
-            }
-        }
+    // dcp: the GPU command thread runs at most one guest frame ahead of the GPU. Without the bound it
+    // ran ahead and then blocked wherever a resource ran out, so flips (and the game's frame timing)
+    // came in bursts.
+    if (previous_frame_tick) {
+        draw_scheduler.Wait(previous_frame_tick);
     }
+    previous_frame_tick = frame->ready_tick;
     return frame;
 }
 
@@ -655,7 +545,7 @@ void Presenter::PresentLoadingFrame() {
                            range);
     barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
             vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eColorAttachmentWrite);
-    Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+    DcpOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
     barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR,
             vk::AccessFlagBits::eColorAttachmentWrite, {});
     SubmitInfo info{};
@@ -671,18 +561,18 @@ void Presenter::PresentLoadingFrame() {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
-    // Free the frame for reuse
+    // Free the frame for reuse (a reused frame was taken out of the queue by PrepareLastFrame).
     const auto free_frame = [&] {
+        std::scoped_lock fl{free_mutex};
         if (!is_reusing_frame) {
             last_submit_frame = frame;
-            std::scoped_lock fl{free_mutex};
-            free_queue.push(frame);
-            free_cv.notify_one();
         }
+        free_queue.push_back(frame);
+        free_cv.notify_one();
     };
 
-    // gow3: a minimized window has no pixels on Windows (0x0); keep the swapchain and skip
-    // presenting until the window is restored.
+    // A minimized window has no pixels on Windows (0x0): keep the swapchain and skip presenting
+    // until the window is restored.
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
         free_frame();
         return;
@@ -711,7 +601,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
-    // gow3: the game frame is blitted (letterboxed) straight into the swapchain image.
+    // The game frame is blitted (letterboxed) straight into the swapchain image.
     const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -769,8 +659,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                          vk::ImageLayout::eTransferDstOptimal,
                          MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
                          vk::Filter::eLinear);
-        // gow3: the settings menu / FPS counter over the frame, at display resolution.
-        const bool overlay = Gow3Overlay::Visible();
+        // The settings menu and the frame counter over the frame, at display resolution.
+        const bool overlay = DcpOverlay::Visible();
         const std::array post_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
@@ -799,9 +689,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
-        Gow3Overlay::LogPresent();
+        DcpOverlay::LogPresent();
         if (overlay) {
-            Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            DcpOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -830,12 +720,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
 
-    // Present to swapchain.
+    // Present to swapchain. Recreation takes the submit lock itself (Swapchain::Destroy).
+    bool presented;
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        presented = swapchain.Present();
+    }
+    if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
     free_frame();
@@ -854,7 +746,7 @@ Frame* Presenter::GetRenderFrame() {
 
         // Take the frame from the queue
         frame = free_queue.front();
-        free_queue.pop();
+        free_queue.pop_front();
     }
 
     const vk::Device device = instance.GetDevice();
@@ -875,9 +767,11 @@ Frame* Presenter::GetRenderFrame() {
         }
     }
 
-    if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
+    const u64 expected_size = expected_frame_size.load(std::memory_order_relaxed);
+    const u32 expected_width = u32(expected_size), expected_height = u32(expected_size >> 32);
+    if (frame->width != expected_width || frame->height != expected_height ||
         frame->is_hdr != swapchain.GetHDR()) {
-        RecreateFrame(frame, expected_frame_width, expected_frame_height);
+        RecreateFrame(frame, expected_width, expected_height);
     }
 
     return frame;
@@ -888,14 +782,16 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
         return; // no surface (minimized window): keep the last frame size
     }
     const float ratio = (float)width / (float)height;
+    const float image_ratio = expected_ratio.load(std::memory_order_relaxed);
 
-    expected_frame_height = height;
-    expected_frame_width = width;
-    if (ratio > expected_ratio) {
-        expected_frame_width = static_cast<s32>(height * expected_ratio);
+    u32 frame_width = u32(width), frame_height = u32(height);
+    if (ratio > image_ratio) {
+        frame_width = static_cast<u32>(height * image_ratio);
     } else {
-        expected_frame_height = static_cast<s32>(width / expected_ratio);
+        frame_height = static_cast<u32>(width / image_ratio);
     }
+    // Present thread; the GPU thread reads it in GetRenderFrame: one value, never half of an update.
+    expected_frame_size.store(u64(frame_width) | u64(frame_height) << 32, std::memory_order_relaxed);
 }
 
 } // namespace Vulkan

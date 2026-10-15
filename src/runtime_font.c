@@ -92,17 +92,6 @@ static const RendererSelection renderer_ft={0x53524646u /* "FFRS" */,sizeof(Rend
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static FT_Library freetype; /* created with the first library, kept for the process lifetime */
 
-static void once(const char *what) {
-    static const char *seen[48];
-    static int count;
-    static pthread_mutex_t seen_lock=PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&seen_lock);
-    for (int i=0;i<count;++i) if (seen[i]==what) { pthread_mutex_unlock(&seen_lock); return; }
-    if (count<48) seen[count++]=what;
-    pthread_mutex_unlock(&seen_lock);
-    printf("[DEBUG_SAULO][Font] %s\n",what);
-}
-
 static Font *font_of(void *handle) {
     Font *font=handle;
     return font && font->magic==FONT_MAGIC && font->face ? font : NULL;
@@ -121,7 +110,6 @@ static int set_size(Font *font, float w, float h) {
 /* ---- Memory, library, renderer ---- */
 static ABI int32_t font_memory_init(FontMemory *memory, void *region, uint32_t size, const void *interface,
                                     void *mspace, void *destroy_callback, void *destroy_object) {
-    once("sceFontMemoryInit");
     if (!memory) return ERR_INVALID_PARAMETER;
     if (!interface && (!region || !size)) { memory->kind=0; return ERR_INVALID_PARAMETER; }
     memory->kind=MEM_MAGIC; memory->attributes=0; memory->region_size=size; memory->region=region;
@@ -131,7 +119,6 @@ static ABI int32_t font_memory_init(FontMemory *memory, void *region, uint32_t s
 }
 
 static ABI int32_t font_memory_term(FontMemory *memory) {
-    once("sceFontMemoryTerm");
     if (!memory) return ERR_INVALID_PARAMETER;
     if (memory->kind!=MEM_MAGIC) return ERR_INVALID_MEMORY;
     if (memory->destroy_callback) {
@@ -146,14 +133,13 @@ static ABI int32_t font_memory_term(FontMemory *memory) {
 }
 
 static ABI const LibrarySelection *font_select_library_ft(int32_t value) {
-    (void)value; once("sceFontSelectLibraryFt"); return &library_ft;
+    (void)value; return &library_ft;
 }
 static ABI const RendererSelection *font_select_renderer_ft(int32_t value) {
-    (void)value; once("sceFontSelectRendererFt"); return &renderer_ft;
+    (void)value; return &renderer_ft;
 }
 
 static ABI int32_t font_create_library(const FontMemory *memory, const void *selection, uint64_t edition, Library **out) {
-    once("sceFontCreateLibraryWithEdition");
     if (!out) return ERR_INVALID_PARAMETER;
     *out=NULL;
     if (!memory || memory->kind!=MEM_MAGIC) return ERR_INVALID_MEMORY;
@@ -170,14 +156,10 @@ static ABI int32_t font_create_library(const FontMemory *memory, const void *sel
     pthread_mutex_unlock(&lock);
     library->magic=LIBRARY_MAGIC; library->memory=memory; library->edition=edition;
     *out=library;
-    int major=0,minor=0,patch=0;
-    FT_Library_Version(freetype,&major,&minor,&patch);
-    printf("[DEBUG_SAULO][Font] library created (edition %#llx, FreeType %d.%d.%d)\n",(unsigned long long)edition,major,minor,patch);
     return FONT_OK;
 }
 
 static ABI int32_t font_destroy_library(Library **pointer) {
-    once("sceFontDestroyLibrary");
     if (!pointer) return ERR_INVALID_PARAMETER;
     Library *library=*pointer;
     if (!library || library->magic!=LIBRARY_MAGIC) return ERR_INVALID_LIBRARY;
@@ -192,25 +174,21 @@ static ABI int32_t font_destroy_library(Library **pointer) {
 }
 
 static ABI int32_t font_support_external_fonts(Library *library, uint32_t max_fonts, uint32_t formats) {
-    once("sceFontSupportExternalFonts");
+    (void)max_fonts; (void)formats;
     if (!library || library->magic!=LIBRARY_MAGIC) return ERR_INVALID_LIBRARY;
-    printf("[DEBUG_SAULO][Font] external fonts supported (max %u, formats %#x)\n",max_fonts,formats);
     return FONT_OK;
 }
 
 static ABI int32_t font_support_system_fonts(Library *library) {
-    once("sceFontSupportSystemFonts");
     return library && library->magic==LIBRARY_MAGIC ? FONT_OK : ERR_INVALID_LIBRARY;
 }
 
 static ABI int32_t font_attach_device_cache(Library *library, void *buffer, uint32_t size) {
     (void)buffer; (void)size;
-    once("sceFontAttachDeviceCacheBuffer");
     return library && library->magic==LIBRARY_MAGIC ? FONT_OK : ERR_INVALID_LIBRARY;
 }
 
 static ABI int32_t font_create_renderer(const FontMemory *memory, const void *selection, uint64_t edition, Renderer **out) {
-    once("sceFontCreateRendererWithEdition");
     if (!out) return ERR_INVALID_PARAMETER;
     *out=NULL;
     if (!memory || memory->kind!=MEM_MAGIC) return ERR_INVALID_MEMORY;
@@ -223,7 +201,6 @@ static ABI int32_t font_create_renderer(const FontMemory *memory, const void *se
 }
 
 static ABI int32_t font_destroy_renderer(Renderer **pointer) {
-    once("sceFontDestroyRenderer");
     if (!pointer) return ERR_INVALID_PARAMETER;
     Renderer *renderer=*pointer;
     if (!renderer || renderer->magic!=RENDERER_MAGIC) return ERR_INVALID_RENDERER;
@@ -235,7 +212,6 @@ static ABI int32_t font_destroy_renderer(Renderer **pointer) {
 
 /* ---- Fonts ---- */
 static ABI int32_t font_open_memory(Library *library, const void *data, uint32_t size, const OpenParams *params, Font **out) {
-    once("sceFontOpenFontMemory");
     if (!library || library->magic!=LIBRARY_MAGIC) { if (out) *out=NULL; return ERR_INVALID_LIBRARY; }
     if (!data || !size || !out) { if (out) *out=NULL; return ERR_INVALID_PARAMETER; }
     *out=NULL;
@@ -255,10 +231,6 @@ static ABI int32_t font_open_memory(Library *library, const void *data, uint32_t
     font->magic=FONT_MAGIC; font->library=library;
     font->scale_w=font->scale_h=font->render_w=font->render_h=scale;
     ++library->fonts;
-    printf("[DEBUG_SAULO][Font] opened %s %s (%u bytes, %ld glyphs, %u units/em)\n",
-           font->face->family_name ? font->face->family_name : "?",
-           font->face->style_name ? font->face->style_name : "",
-           size,(long)font->face->num_glyphs,font->face->units_per_EM);
     pthread_mutex_unlock(&lock);
     *out=font;
     return FONT_OK;
@@ -266,15 +238,12 @@ static ABI int32_t font_open_memory(Library *library, const void *data, uint32_t
 
 /* The PS4 system font sets live in the firmware and are not part of the game. */
 static ABI int32_t font_open_font_set(Library *library, uint32_t set, uint32_t flags, const OpenParams *params, Font **out) {
-    (void)params;
-    once("sceFontOpenFontSet");
-    printf("[DEBUG_SAULO][Font] system font set %#x (flags %#x) unavailable\n",set,flags);
+    (void)set; (void)flags; (void)params;
     if (out) *out=NULL;
     return library && library->magic==LIBRARY_MAGIC ? ERR_FONT_OPEN_FAILED : ERR_INVALID_LIBRARY;
 }
 
 static ABI int32_t font_close(Font *handle) {
-    once("sceFontCloseFont");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     if (!font) { pthread_mutex_unlock(&lock); return ERR_INVALID_FONT_HANDLE; }
@@ -290,7 +259,6 @@ static ABI int32_t font_close(Font *handle) {
 }
 
 static ABI int32_t font_bind_renderer(Font *handle, Renderer *renderer) {
-    once("sceFontBindRenderer");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     int32_t result=FONT_OK;
@@ -306,7 +274,6 @@ static ABI int32_t font_bind_renderer(Font *handle, Renderer *renderer) {
 }
 
 static ABI int32_t font_unbind_renderer(Font *handle) {
-    once("sceFontUnbindRenderer");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     int32_t result=!font ? ERR_INVALID_FONT_HANDLE : !font->renderer ? ERR_NOT_BOUND_RENDERER : FONT_OK;
@@ -316,7 +283,6 @@ static ABI int32_t font_unbind_renderer(Font *handle) {
 }
 
 static ABI int32_t font_set_scale_pixel(Font *handle, float w, float h) {
-    once("sceFontSetScalePixel");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     if (font) { font->scale_w=w; font->scale_h=h; }
@@ -325,7 +291,6 @@ static ABI int32_t font_set_scale_pixel(Font *handle, float w, float h) {
 }
 
 static ABI int32_t font_setup_render_scale_pixel(Font *handle, float w, float h) {
-    once("sceFontSetupRenderScalePixel");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     int32_t result=!font ? ERR_INVALID_FONT_HANDLE : !font->renderer ? ERR_NOT_BOUND_RENDERER : FONT_OK;
@@ -337,7 +302,6 @@ static ABI int32_t font_setup_render_scale_pixel(Font *handle, float w, float h)
 /* Baseline and line height from the font bounding box (head.yMax / yMin), at the font scale.
  * decorationExtent only grows with weight effects, which the game never sets. */
 static ABI int32_t font_get_horizontal_layout(Font *handle, HorizontalLayout *layout) {
-    once("sceFontGetHorizontalLayout");
     pthread_mutex_lock(&lock);
     Font *font=font_of(handle);
     int32_t result=FONT_OK;
@@ -361,7 +325,6 @@ static ABI int32_t font_get_horizontal_layout(Font *handle, HorizontalLayout *la
 
 static ABI void font_render_surface_init(RenderSurface *surface, void *buffer, int32_t width_byte,
                                          int32_t pixel_size_byte, int32_t width, int32_t height) {
-    once("sceFontRenderSurfaceInit");
     if (!surface) return;
     if (width<0) width=0;
     if (height<0) height=0;

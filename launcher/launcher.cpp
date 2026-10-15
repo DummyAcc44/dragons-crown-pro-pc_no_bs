@@ -21,6 +21,7 @@
 #include "dcp_displays.h"
 #include "dcp_resolution.h"
 #include "game_files.h"
+#include "game_install.h"
 #include "host.h"
 #include "options.h"
 #include "placement.h"
@@ -39,6 +40,10 @@ namespace {
 // The gold of the Dragon's Crown logo lettering (#E0BB32).
 const ImVec4 kAccent = ImVec4(0.878f, 0.733f, 0.196f, 1.0f);
 constexpr double kPlayFeedbackSeconds = 0.4;
+constexpr char kGameFilesHelp[] =
+    "Select your own legally obtained Dragon's Crown Pro package (.pkg, CUSA10454, version 01.03). It is unpacked into "
+    "the game folder next to the program (about 6 GB). No game files are included. Reinstalling keeps your saves and "
+    "settings.";
 constexpr char kShowLauncherHelp[] = "Off starts the game directly. Hold Shift while starting to bring it back.";
 constexpr char kWindowSizeHelp[] =
     "The game window's size in pixels in Windowed mode. The picture keeps its shape: other window shapes get black bars.";
@@ -48,11 +53,11 @@ constexpr char kGraphicsCardHelp[] =
 constexpr char kMonitorHelp[] = "The display the game opens on.";
 constexpr char kVSyncHelp[] = "On prevents tearing. Off allows it, for the lowest latency and G-Sync/FreeSync.";
 constexpr char kUpscaleHelp[] =
-    "Enlarges the game's 1920 \xC3\x97 1080 picture to a bigger window with AMD FidelityFX Super Resolution 1. "
-    "It has no effect when the window is the picture's size or smaller.";
+    "Enlarges the game's picture to a bigger window with AMD FidelityFX Super Resolution 1. It has no effect when the "
+    "window is the size of the render resolution or smaller.";
 constexpr char kSharpenHelp[] =
-    "Sharpens the final picture (AMD RCAS). It applies when the window is exactly 1920 \xC3\x97 1080, or together "
-    "with FSR 1 in a bigger window.";
+    "Sharpens the final picture (AMD RCAS). It applies when the window is the size of the render resolution, or "
+    "together with FSR 1 in a bigger window.";
 constexpr char kRenderResolutionHelp[] =
     "The resolution the game renders at. It is separate from the window size: the picture is scaled to the window. "
     "1440p and above need a powerful graphics card.";
@@ -104,8 +109,8 @@ const char* StatusTitle(GameFileState state) {
 const char* StatusDetail(GameFileState state) {
     switch (state) {
     case GameFileState::kValid: return "";
-    case GameFileState::kMissing: return "Install the game from your own PS4 package.";
-    case GameFileState::kDifferentVersion: return "Install version 1.03 (CUSA10454) from your own PS4 package.";
+    case GameFileState::kMissing: return "Install the game from your own .pkg file.";
+    case GameFileState::kDifferentVersion: return "Install version 01.03 (CUSA10454) from your own .pkg file.";
     case GameFileState::kReadError: return "Check that the game folder can be read, then install again.";
     }
     return "";
@@ -143,7 +148,7 @@ public:
         if (PlacementIsSet(saved)) {
             options.restore = saved;
         }
-        // DEBUG_SAULO: DCP_LAUNCHER_SHOTS=<folder> renders every page into the folder with a hidden window, then quits.
+        // DCP_LAUNCHER_SHOTS=<folder> (tests/launcher_shots.cpp): every page into the folder, hidden, then quit.
         const char* shots = std::getenv("DCP_LAUNCHER_SHOTS");
         options.hidden = shots != nullptr;
         if (!host_.Open(options)) {
@@ -193,6 +198,7 @@ public:
 private:
     Outcome Frame() {
         TrackPlacement();
+        PollInstall();
         if (play_.starting() && ImGui::GetTime() - play_started_ >= kPlayFeedbackSeconds) {
             return Outcome::kPlay;
         }
@@ -286,6 +292,9 @@ private:
             c.pages.push_back(MakePage(page));
         }
         c.can_play = [this] {
+            if (install_.running()) {
+                return trg::PlayCheck{false, "Wait for the installation to finish.", 0};
+            }
             if (files_ == GameFileState::kValid) {
                 return trg::PlayCheck{};
             }
@@ -330,26 +339,76 @@ private:
             ui.Help(install_failure_text_.c_str());
             ui.Spacer(4);
         }
-        ui.Row("Game package", "Title ID CUSA10454, version 1.03. The game files are prepared from your own PS4 package; "
-                               "none are included.");
-        const bool clicked = ready ? ImGui::Button("Reinstall from package...", ImVec2(-FLT_MIN, 0))
-                                   : ui.AccentButton("Install from package...");
-        if (clicked) {
-            InstallFromPackage();
+        ui.Row("Game files", kGameFilesHelp);
+        if (!ui.TaskProgress(install_)) {
+            const bool clicked = ready ? ImGui::Button("Reinstall game...", ImVec2(-FLT_MIN, 0))
+                                       : ui.AccentButton("Install game...");
+            if (clicked) {
+                BrowseAndInstall();
+            }
         }
         ui.Toggle("Show this launcher", kShowLauncherHelp, kShowLauncherKey, true, "Off", "On");
         ui.EndRows();
     }
 
-    // The PS4 package reader and the boot image builder are still Python tools (scripts\), which a release cannot
-    // depend on, so the launcher does not install yet. Play works with a game prepared by tools\prepare-game.ps1.
-    void InstallFromPackage() {
-        install_failure_ = "Package installation is not available yet";
-        install_failure_text_ =
-            "The native PS4 package installer is still to be written. Until then, prepare the game with "
-            "tools\\prepare-game.ps1, then press Play.";
-        launcher_->SetStatus(install_failure_ + ".", 8.0);
-        Log("package install requested: the native installer is not available");
+    void BrowseAndInstall() {
+        if (install_.running()) {
+            return;
+        }
+        const std::string picked =
+            trg::BrowseForFile("Select your Dragon's Crown Pro package", {{"PS4 packages (*.pkg)", "*.pkg"}});
+        if (picked.empty()) {
+            return;
+        }
+        install_failure_.clear();
+        install_failure_text_.clear();
+        outcome_ = std::make_shared<InstallResult>();
+        const bool started = install_.Start(
+            "Checking the package...",
+            [outcome = outcome_, source = PathFromUtf8(picked), paths = paths_](trg::Task& task) {
+                InstallHooks hooks;
+                hooks.phase = [&task](const char* text) {
+                    task.SetLabel(text);
+                    task.Progress(0, 0);
+                };
+                hooks.progress = [&task](uint64_t done, uint64_t total) {
+                    task.Progress(static_cast<long long>(done), static_cast<long long>(total));
+                    return !task.cancelled();
+                };
+                *outcome = InstallGame(source, paths, hooks);
+                return outcome->ok() ? std::string() : std::string(DescribeInstall(outcome->status).title);
+            });
+        if (started) {
+            Log("installing the game from %s", picked.c_str());
+        }
+    }
+
+    // Runs every frame so a finished install is picked up whichever page is open.
+    void PollInstall() {
+        if (install_.Finish() == trg::Task::State::kIdle) {
+            return;
+        }
+        const std::shared_ptr<InstallResult> outcome = std::move(outcome_);
+        if (!outcome) {
+            return;
+        }
+        const InstallMessage message = DescribeInstall(outcome->status);
+        if (outcome->ok()) {
+            Log("game installed: %zu files (%zu linked), %llu bytes", outcome->files, outcome->linked,
+                static_cast<unsigned long long>(outcome->bytes));
+            files_ = CheckAndLog(paths_).state;
+            launcher_->SetStatus(std::string(message.title) + ". " + message.text, 6.0);
+            return;
+        }
+        if (outcome->status == InstallStatus::kCancelled) {
+            Log("game install cancelled");
+            launcher_->SetStatus(std::string(message.title) + ". " + message.text, 6.0);
+            return;
+        }
+        Log("game install failed: %s (%s)", message.title, outcome->detail.c_str());
+        install_failure_ = message.title;
+        install_failure_text_ = message.text;
+        launcher_->SetStatus(std::string("Install failed: ") + install_failure_, 8.0);
     }
 
     const Display* SelectedDisplay() const { return DisplayForSetting(displays_, settings_.GetInt(kMonitorKey, 1)); }
@@ -504,6 +563,8 @@ private:
     PlacementTracker placement_;
     int frames_ = 0;
     double play_started_ = 0.0;
+    std::shared_ptr<InstallResult> outcome_;
+    trg::Task install_;
     std::string install_failure_;
     std::string install_failure_text_;
 };

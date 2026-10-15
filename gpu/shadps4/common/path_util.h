@@ -105,6 +105,9 @@ constexpr auto LOG_FILE = "shad_log.txt";
  */
 void SetUserPath(PathType user_path, const std::filesystem::path& new_path);
 
+/// dcp: points every user path into `user_dir`, before the renderer starts.
+void SetUserDir(const std::filesystem::path& user_dir);
+
 /**
  * Recursively searches for an installed game by its ID.
  * Limits search depth to prevent excessive filesystem traversal.

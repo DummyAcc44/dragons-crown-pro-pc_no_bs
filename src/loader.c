@@ -12,7 +12,7 @@
 #include "dcp_resolution.h"
 #include "runtime_log.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
-#error This prototype requires x86-64 GCC or Clang (including MinGW).
+#error Dragon's Crown Pro PC requires x86-64 GCC or Clang (including MinGW).
 #endif
 #ifdef _WIN32
 #include <windows.h>
@@ -187,7 +187,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
-/* Guest code reads its TCB with `mov rax, gs:[0]` (prepare_image.py rewrote fs:[0]); on Windows
+/* Guest code reads its TCB with `mov rax, gs:[0]` (the boot image builder rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
 uint32_t runtime_thread_tcb_offset(void);
 static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
@@ -322,26 +322,18 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
             address - segments[i].address <= segments[i].size - bytes) return 1;
     return 0;
 }
-static void default_env(const char *name, const char *value) {
-    if (getenv(name)) return;
-#ifdef _WIN32
-    _putenv_s(name, value);
-#else
-    setenv(name, value, 0);
-#endif
-}
-/* What the video core needs for correct output: no temporal upscaler hooks, linear readbacks (black surfaces
- * otherwise), PS4 VBlank at 60 Hz. The environment still overrides them. */
-static void apply_runtime_defaults(const char *user_dir) {
-    default_env("GOW3_UPSCALER", "none");
-    default_env("GOW3_READBACK_LINEAR", "1");
-    default_env("GOW3_VBLANK_HZ", "60");
-    char settings[4200];
-    snprintf(settings, sizeof(settings), "%s/dcp.ini", user_dir);
-    default_env("GOW3_CONFIG", settings);
-}
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* tools\build.ps1: the launcher's boot image builder on a prepared game folder, without starting anything. */
+    if (argc == 4 && !strcmp(argv[1], "--prepare-image")) {
+        char error[1024];
+        if (dcp_build_boot_image(argv[2], argv[3], error, sizeof(error))) {
+            fprintf(stderr, "Boot image failed: %s\n", error);
+            return 1;
+        }
+        printf("Boot image written to %s\n", argv[3]);
+        return 0;
+    }
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
@@ -390,12 +382,13 @@ int main(int argc, char **argv) {
         atexit(runtime_log_flush);
     } else fprintf(stderr,"Cannot create the log %s\n",log_file ? log_file : paths.logs_dir);
 #endif
-    apply_runtime_defaults(user_dir);
+    static char settings_file[4200];
+    snprintf(settings_file,sizeof(settings_file),"%s/dcp.ini",user_dir);
     if (!cpu_only && !check_imports) {
-        DcpLauncherConfig launcher={app0,paths.image_dir,user_dir,getenv("GOW3_CONFIG"),paths.logs_dir,skip_launcher};
+        DcpLauncherConfig launcher={app0,paths.image_dir,user_dir,settings_file,paths.logs_dir,skip_launcher};
         if (dcp_launcher_run(&launcher)==DCP_LAUNCHER_QUIT) exit(0);
     }
-    render_resolution=&dcp_resolutions[dcp_render_resolution(getenv("GOW3_CONFIG"))];
+    render_resolution=&dcp_resolutions[dcp_render_resolution(settings_file)];
     runtime_dcp_set_neo_mode(render_resolution->pro_memory);
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
@@ -444,7 +437,7 @@ int main(int argc, char **argv) {
     alarm(timeout_seconds); /* 0 disables the watchdog */
 #endif
     FILE *f = fopen(boot, "rb");
-    if (!f) fail("cannot open boot file; run tools/prepare-game.ps1 first");
+    if (!f) fail("cannot open boot file; install the game from the launcher first");
     char magic[8];
     if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "DCPBOOT1", 8)) fail("bad boot file signature");
     uint64_t size = read64(f), entry = read64(f), ns = read64(f), nr = read64(f);
@@ -540,7 +533,7 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        DcpGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        DcpGpuConfig gpu={title,serial,user_dir,settings_file,(uint32_t)sdk,attributes,1920,1080};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (dcpgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,dcpgpu_symbol_count());

@@ -32,18 +32,14 @@ Audio (WASAPI via SDL3) and the pad (Xbox One S) initialise with the existing ru
 
 `gpu/` is `uncharted-ndc-native/gpu` (itself `medievil_pc/gpu`; shadPS4 `b4e7ae7`): same tree minus `videodec2*` (the game
 does not import it), `ndcgpu` renamed `dcpgpu`, `ndc_setjmp` → `dcp_setjmp`, `ndc.ini` → `dcp.ini`. `sirit`, `gcn`, `half`
-and the font are vendored; `fsr-vulkan`, `imgui`, `magic_enum`, `miniz`, `xbyak` are fetched at the pinned commits of
-`gpu/deps.txt` by `tools\build.ps1` and git-ignored. `GOW3_*` names inside it are inherited and unchanged; `run_game.py`
-sets the generic defaults. The first run compiles shaders on demand (no pipeline cache yet).
+and the font are vendored; `imgui`, `magic_enum`, `miniz`, `xbyak` are fetched at the pinned commits of `gpu/deps.txt`
+by `tools\build.ps1` and git-ignored. The inherited `gow3_*` shim names and `GOW3_*` switches were renamed or removed in the
+release review (docs/GRAPHICS.md). The first run compiles shaders on demand (no pipeline cache yet).
 
 ## Saves
 
 The first start creates `user\savedata\1\CUSA10454\SAVEDATA00` (the game writes `SAVE0.DAT`). Remove `user\savedata` to
 see the first-run prompt again.
-
-## Diagnostics present
-
-`[DEBUG_SAULO][Font]` lines (`runtime_font.c`), `[DEBUG_SAULO][ErrorDialog]` (`runtime_services.c`).
 
 ## Commands
 

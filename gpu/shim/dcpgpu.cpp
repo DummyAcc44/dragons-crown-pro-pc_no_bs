@@ -1,30 +1,29 @@
-#include "gow3_write_log.h"
 // Glue between the C loader (src/dcpgpu.h) and the vendored shadPS4 video core.
-#include "gow3_overlay.h"
-#include "gow3_png.h"
-#include "gow3_settings.h"
-#include "gow3_copy.h"
-#ifndef _WIN32
-#include <sys/resource.h>
-#endif
-#include "gow3_toggles.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
-#include <boost/asio/io_context.hpp>
-#include "common/polyfill_thread.h"
-#include "video_core/renderdoc.h"
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
-#include <chrono>
 #include <thread>
 #include <vector>
 #include <SDL3/SDL.h>
+#include <boost/asio/io_context.hpp>
+#include "common/polyfill_thread.h"
+#include "dcp_copy_pool.h"
+#include "dcp_overlay.h"
+#include "dcp_png.h"
+#include "dcp_settings.h"
+#include "dcp_toggles.h"
+#include "dcp_write_log.h"
 #include "dcpgpu.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "common/path_util.h"
 #include "common/rdtsc.h"
+#include "video_core/renderdoc.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
@@ -53,7 +52,6 @@ void runtime_log_flush(void);
 Frontend::WindowSDL* g_window = nullptr;
 
 namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
-namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::VideoOut { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::Kernel { void RegisterEventQueue(Core::Loader::SymbolsResolver* sym); }
 
@@ -121,28 +119,28 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
     }
 }
 void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
-    // gow3: large uploads (streaming) are split across the copy threads.
+    // Large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
-    if (size < 4 * Chunk || !Gow3Copy::Enabled()) {
+    if (size < 4 * Chunk || !DcpCopyPool::Enabled()) {
         return CopySparseSerial(source, dest, size);
     }
-    Gow3Copy::ParallelFor((size + Chunk - 1) / Chunk, [&](std::size_t i) {
+    DcpCopyPool::ParallelFor((size + Chunk - 1) / Chunk, [&](std::size_t i) {
         const u64 offset = i * Chunk;
         CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
     });
 }
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);
+    DcpWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, DcpWriteLog::Backing);
     return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
-    Gow3Stats::Timer timer{Gow3Stats::t_protect};
+    DcpStats::Timer timer{DcpStats::t_protect};
     const u64 pages = (size + 4095) / 4096;
-    Gow3Stats::protect_calls.fetch_add(1, std::memory_order_relaxed);
-    Gow3Stats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
+    DcpStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
+    DcpStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
     if (!True(perms & MemoryPermission::Write)) {
-        Gow3Stats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
-        Gow3Stats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
+        DcpStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
+        DcpStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
     }
     runtime_memory_gpu_protect(virtual_addr, size, True(perms & MemoryPermission::Read),
                                True(perms & MemoryPermission::Write));
@@ -161,7 +159,8 @@ u64 PS4_SYSV_ABI sceKernelReadTsc() { return Common::FencedRDTSC(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTime() { return runtime_process_time_us(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounter() { return runtime_process_time_counter(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() { return 1'000'000'000; }
-s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return 0; } // base PS4
+// The video core's own GnmDriver packets and tiling stay base PS4; the game's answer comes from runtime_dcp.c.
+s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return 0; }
 s32 PS4_SYSV_ABI sceKernelGetCompiledSdkVersion(s32* ver) {
     if (!ver) return ORBIS_KERNEL_ERROR_EINVAL;
     *ver = s32(g_sdk_version);
@@ -181,30 +180,17 @@ std::condition_variable g_window_cv;
 bool g_window_ready;
 } // namespace
 
-u32 Gow3DisplayRefreshHz() {
-    static const u32 hz = [] {
-        const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
-        const u32 rate = mode && mode->refresh_rate > 0 ? u32(mode->refresh_rate + 0.5f) : 60;
-        std::printf("GPU: vblank follows the display refresh rate, %u Hz\n", rate);
-        return std::max<u32>(rate, 60);
-    }();
-    return hz;
-}
-
 extern "C" int dcpgpu_available(void) {
     return 1;
 }
 
 extern "C" int dcpgpu_init(const DcpGpuConfig* config) {
-    Gow3Settings::Load();
+    DcpSettings::Load(config->settings_file);
+    const std::string user_dir = config->user_dir;
+    Common::FS::SetUserDir(std::filesystem::path(std::u8string(user_dir.begin(), user_dir.end())));
     g_sdk_version = config->sdk_version;
-#ifdef _WIN32
-    if (config->user_dir && !std::getenv("GOW3_GPU_USER_DIR")) _putenv_s("GOW3_GPU_USER_DIR", config->user_dir);
-#else
-    if (config->user_dir) setenv("GOW3_GPU_USER_DIR", config->user_dir, 0);
-#endif
     Core::Emulator::FillElfInfo(*config);
-    const std::string title = config->title ? config->title : "Uncharted: The Nathan Drake Collection";
+    const std::string title = config->title ? config->title : "Dragon's Crown Pro";
     const s32 width = config->width, height = config->height;
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("dcp:window");
@@ -239,7 +225,6 @@ extern "C" void dcpgpu_register_kernel(void) {
     Libraries::Kernel::StartKernelService();
     Core::Loader::SymbolsResolver resolver;
     Libraries::Kernel::RegisterEventQueue(&resolver);
-    Libraries::AvPlayer::RegisterLib(&resolver);
 }
 
 extern "C" uintptr_t dcpgpu_resolve(const char* scoped_nid) {
@@ -313,7 +298,7 @@ ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
 
 extern "C" int dcpgpu_overlay_captures_input(void) {
-    return Gow3Overlay::CapturesInput() ? 1 : 0;
+    return DcpOverlay::CapturesInput() ? 1 : 0;
 }
 
 extern "C" int dcpgpu_text_input_begin(const char* initial, const char* prompt) {
@@ -326,24 +311,24 @@ extern "C" int dcpgpu_choice_begin(const char* title, const char* const* items, 
                                     int count, int focus) {
     if (!g_window || count <= 0) return 0;
     // Pictures are decoded here, on the game's thread, before the list is shown.
-    std::vector<Gow3Png::Image> pictures(count);
+    std::vector<DcpPng::Image> pictures(count);
     for (int i = 0; images && i < count; ++i) {
-        if (images[i] && !Gow3Png::LoadRgba(images[i], pictures[i])) {
+        if (images[i] && !DcpPng::LoadRgba(images[i], pictures[i])) {
             LOG_WARNING(Lib_SaveDataDialog, "save list: no picture from {}", images[i]);
         }
     }
-    Gow3Overlay::BeginChoice(title ? title : "", std::vector<std::string>(items, items + count),
+    DcpOverlay::BeginChoice(title ? title : "", std::vector<std::string>(items, items + count),
                              std::move(pictures), focus);
     return 1;
 }
 
 extern "C" int dcpgpu_choice_poll(void) {
-    Gow3Overlay::PollChoiceInput(); // the game polls the dialog; the list reads the pad here too
-    return Gow3Overlay::PollChoice();
+    DcpOverlay::PollChoiceInput(); // the game polls the dialog; the list reads the pad here too
+    return DcpOverlay::PollChoice();
 }
 
 extern "C" void dcpgpu_choice_set_input(uint32_t (*buttons)(void)) {
-    Gow3Overlay::SetChoiceInput(buttons);
+    DcpOverlay::SetChoiceInput(buttons);
 }
 
 extern "C" int dcpgpu_text_input_poll(char* out, uint64_t size) {

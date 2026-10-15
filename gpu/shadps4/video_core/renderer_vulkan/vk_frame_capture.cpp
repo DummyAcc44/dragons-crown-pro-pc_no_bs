@@ -8,6 +8,7 @@
 #include <format>
 #include <mutex>
 
+#include "common/path_util.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image_info.h"
 
@@ -52,7 +53,7 @@ void AddBuffers(Entry& entry) {
 bool pass_open = false;
 std::mutex display_mutex;
 std::vector<VAddr> display_buffers;
-// gow3: read on every draw; the game registers a handful of display buffers once.
+// dcp: read on every draw; the game registers a handful of display buffers once.
 std::array<std::atomic<VAddr>, 16> display_list{};
 std::atomic<u32> display_count{0};
 
@@ -83,22 +84,12 @@ void AddShader(Entry& entry, u64 hash) {
     }
 }
 
-std::mutex result_mutex;
-std::string result; ///< for the menu (FrameCapture::LastResult)
-
-void SetResult(std::string text) {
-    std::printf("Frame capture: %s\n", text.c_str());
-    std::scoped_lock lk{result_mutex};
-    result = std::move(text);
-}
-
-// GOW3_CAPTURE_DIR, else <user>/captures (GOW3_GPU_USER_DIR, the saves folder).
+// DCP_CAPTURE_DIR, else the user folder's captures.
 std::filesystem::path CaptureDir() {
-    if (const char* dir = std::getenv("GOW3_CAPTURE_DIR"); dir && dir[0]) {
+    if (const char* dir = std::getenv("DCP_CAPTURE_DIR"); dir && dir[0]) {
         return dir;
     }
-    const char* user = std::getenv("GOW3_GPU_USER_DIR");
-    return std::filesystem::path(user && user[0] ? user : "user") / "captures";
+    return Common::FS::GetUserPath(Common::FS::PathType::CapturesDir);
 }
 
 void Write(VAddr presented) {
@@ -113,7 +104,6 @@ void Write(VAddr presented) {
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         std::printf("Frame capture: cannot write %s\n", path.c_str());
-        SetResult("Capture failed: cannot write " + path);
         return;
     }
     std::fprintf(f, "presented buffer %#llx\n", static_cast<unsigned long long>(presented));
@@ -147,7 +137,6 @@ void Write(VAddr presented) {
     }
     std::fclose(f);
     std::printf("Frame capture: %zu passes written to %s\n", entries.size(), path.c_str());
-    SetResult(std::format("Frame captured ({} passes): {}", entries.size(), path));
 }
 
 } // namespace
@@ -155,30 +144,16 @@ void Write(VAddr presented) {
 void FrameCapture::OnFlip(VAddr presented_address) {
     last_presented.store(presented_address, std::memory_order_relaxed);
     flips.fetch_add(1, std::memory_order_release);
-    static const char* trigger = std::getenv("GOW3_CAPTURE_TRIGGER");
-    if (state.load(std::memory_order_relaxed) != Idle) {
+    static const char* trigger = std::getenv("DCP_CAPTURE_TRIGGER");
+    if (!trigger || state.load(std::memory_order_relaxed) != Idle) {
         return;
     }
-    bool arm = requested.exchange(false, std::memory_order_acq_rel);
-    if (!arm && trigger && std::filesystem::exists(trigger)) {
-        std::error_code ec;
+    std::error_code ec;
+    if (std::filesystem::exists(trigger, ec)) {
         std::filesystem::remove(trigger, ec);
-        arm = true;
-    }
-    if (arm) {
         state.store(Armed, std::memory_order_release);
         std::printf("Frame capture: armed\n");
     }
-}
-
-void FrameCapture::Request() {
-    SetResult("Capturing the next frame...");
-    requested.store(true, std::memory_order_release);
-}
-
-std::string FrameCapture::LastResult() {
-    std::scoped_lock lk{result_mutex};
-    return result;
 }
 
 void FrameCapture::Poll() {}
@@ -222,7 +197,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         }
     }
     // Frame boundaries in the command stream: the pass that writes a display buffer as its only
-    // target. gow3: God of War III also draws scene passes (two targets) into display buffers.
+    // target (a pass with more targets can draw into a display buffer too).
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);

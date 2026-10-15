@@ -7,13 +7,24 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
-#include "gow3_settings.h"
+#include "dcp_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
+
+// dcp: vkDeviceWaitIdle needs every queue of the device externally synchronized, and the GPU thread keeps
+// submitting while the window changes size (F11, display mode, VSync).
+static void WaitDeviceIdle(const Instance& instance, const char* why) {
+    std::scoped_lock lock{Scheduler::submit_mutex};
+    if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {
+        LOG_WARNING(Render_Vulkan, "Failed to wait for the device to become idle {}: {}", why,
+                    vk::to_string(result));
+    }
+}
 
 static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
     .format = vk::Format::eA2B10G10R10UnormPack32,
@@ -92,12 +103,7 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
-                    vk::to_string(result));
-    }
-
+    WaitDeviceIdle(instance, "on an HDR change");
     needs_hdr = hdr;
     Recreate(width, height);
     ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
@@ -200,9 +206,9 @@ void Swapchain::FindPresentMode() {
         return;
     }
 
-    // gow3: VSync on is Fifo (no tearing, waits for the display); off is Mailbox when the
-    // driver has it, else Immediate (tearing allowed), else Fifo.
-    vsync = Gow3Settings::Get().vsync;
+    // VSync on is Fifo (no tearing, waits for the display); off is Mailbox when the driver has it,
+    // else Immediate (tearing allowed), else Fifo.
+    vsync = DcpSettings::Get().vsync;
     const auto has = [&](vk::PresentModeKHR mode) { return std::ranges::find(modes, mode) != modes.cend(); };
     present_mode = vsync ? vk::PresentModeKHR::eFifo
                    : has(vk::PresentModeKHR::eMailbox) ? vk::PresentModeKHR::eMailbox
@@ -212,13 +218,10 @@ void Swapchain::FindPresentMode() {
 }
 
 void Swapchain::UpdateVsync() {
-    if (Gow3Settings::Get().vsync == vsync) {
+    if (DcpSettings::Get().vsync == vsync) {
         return;
     }
-    if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {
-        LOG_WARNING(Render_Vulkan, "Failed to wait for the device before a VSync change: {}",
-                    vk::to_string(result));
-    }
+    WaitDeviceIdle(instance, "before a VSync change");
     FindPresentMode();
     Recreate(width, height);
 }
@@ -258,11 +261,7 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     vk::Device device = instance.GetDevice();
-    const auto wait_result = device.waitIdle();
-    if (wait_result != vk::Result::eSuccess) {
-        LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
-                    vk::to_string(wait_result));
-    }
+    WaitDeviceIdle(instance, "before destroying the swapchain");
 
     for (auto& image_view : images_view) {
         device.destroyImageView(image_view);

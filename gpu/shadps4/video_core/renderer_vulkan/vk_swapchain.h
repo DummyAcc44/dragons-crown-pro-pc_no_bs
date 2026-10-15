@@ -88,8 +88,8 @@ public:
 
     void SetHDR(bool hdr);
 
-    /// gow3: VSync from the in-game menu (Gow3Settings::vsync); recreates the swapchain when it
-    /// changed. Present thread only.
+    /// VSync from the settings (DcpSettings::vsync); recreates the swapchain when it changed.
+    /// Present thread only.
     void UpdateVsync();
 
     bool GetHDR() const {

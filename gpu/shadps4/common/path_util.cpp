@@ -84,74 +84,37 @@ static std::optional<std::filesystem::path> GetBundleParentDirectory() {
 }
 #endif
 
-static auto UserPaths = [] {
-    // gow3: the port keeps GPU caches where GOW3_GPU_USER_DIR points.
-    const char* port_dir = std::getenv("GOW3_GPU_USER_DIR");
-    auto user_dir = port_dir ? std::filesystem::path(port_dir) : std::filesystem::current_path() / PORTABLE_DIR;
-    if (!std::filesystem::exists(user_dir)) {
-        // If it doesn't exist, use the standard path for the platform instead.
-        // NOTE: On Windows we currently just create the portable directory instead.
-#ifdef __APPLE__
-        user_dir =
-            std::filesystem::path(getenv("HOME")) / "Library" / "Application Support" / "shadPS4";
-#elif defined(__linux__)
-        const char* xdg_data_home = getenv("XDG_DATA_HOME");
-        if (xdg_data_home != nullptr && strlen(xdg_data_home) > 0) {
-            user_dir = std::filesystem::path(xdg_data_home) / "shadPS4";
-        } else {
-            user_dir = std::filesystem::path(getenv("HOME")) / ".local" / "share" / "shadPS4";
-        }
-#elif _WIN32
-        // gow3: never shadPS4's %APPDATA% folder (an installed shadPS4 owns it); this runs
-        // before main, so the portable folder is created here (run.py sets GOW3_GPU_USER_DIR).
-        std::filesystem::create_directories(user_dir);
-#endif
-    }
-
-    std::unordered_map<PathType, fs::path> paths;
-
-    const auto create_path = [&](PathType shad_path, const fs::path& new_path) {
-        std::filesystem::create_directory(new_path);
-        paths.insert_or_assign(shad_path, new_path);
+// dcp: every path follows the port's user folder (SetUserDir). Nothing is created up front: the code that writes
+// into a folder creates it.
+static std::unordered_map<PathType, fs::path> MakeUserPaths(const fs::path& user_dir) {
+    return {
+        {PathType::UserDir, user_dir},
+        {PathType::LogDir, user_dir / LOG_DIR},
+        {PathType::ScreenshotsDir, user_dir / SCREENSHOTS_DIR},
+        {PathType::ShaderDir, user_dir / SHADER_DIR},
+        {PathType::GameDataDir, user_dir / GAMEDATA_DIR},
+        {PathType::TempDataDir, user_dir / TEMPDATA_DIR},
+        {PathType::SysModuleDir, user_dir / SYSMODULES_DIR},
+        {PathType::DownloadDir, user_dir / DOWNLOAD_DIR},
+        {PathType::CapturesDir, user_dir / CAPTURES_DIR},
+        {PathType::CheatsDir, user_dir / CHEATS_DIR},
+        {PathType::PatchesDir, user_dir / PATCHES_DIR},
+        {PathType::MetaDataDir, user_dir / METADATA_DIR},
+        {PathType::CustomTrophy, user_dir / CUSTOM_TROPHY},
+        {PathType::CustomConfigs, user_dir / CUSTOM_CONFIGS},
+        {PathType::CacheDir, user_dir / CACHE_DIR},
+        {PathType::FontsDir, user_dir / FONTS_DIR},
+        {PathType::TrophyDir, user_dir / TROPHY_DIR},
+        {PathType::HomeDir, user_dir / HOME_DIR},
+        {PathType::CustomModulesDir, user_dir / CUSTOM_MODULES_DIR},
     };
+}
 
-    create_path(PathType::UserDir, user_dir);
-    create_path(PathType::LogDir, user_dir / LOG_DIR);
-    create_path(PathType::ScreenshotsDir, user_dir / SCREENSHOTS_DIR);
-    create_path(PathType::ShaderDir, user_dir / SHADER_DIR);
-    create_path(PathType::GameDataDir, user_dir / GAMEDATA_DIR);
-    create_path(PathType::TempDataDir, user_dir / TEMPDATA_DIR);
-    create_path(PathType::SysModuleDir, user_dir / SYSMODULES_DIR);
-    create_path(PathType::DownloadDir, user_dir / DOWNLOAD_DIR);
-    create_path(PathType::CapturesDir, user_dir / CAPTURES_DIR);
-    create_path(PathType::CheatsDir, user_dir / CHEATS_DIR);
-    create_path(PathType::PatchesDir, user_dir / PATCHES_DIR);
-    create_path(PathType::MetaDataDir, user_dir / METADATA_DIR);
-    create_path(PathType::CustomTrophy, user_dir / CUSTOM_TROPHY);
-    create_path(PathType::CustomConfigs, user_dir / CUSTOM_CONFIGS);
-    create_path(PathType::CacheDir, user_dir / CACHE_DIR);
-    create_path(PathType::FontsDir, user_dir / FONTS_DIR);
-    create_path(PathType::TrophyDir, user_dir / TROPHY_DIR);
-    create_path(PathType::HomeDir, user_dir / HOME_DIR);
-    create_path(PathType::CustomModulesDir, user_dir / CUSTOM_MODULES_DIR);
+static auto UserPaths = MakeUserPaths(PORTABLE_DIR);
 
-    std::ofstream notice_file(user_dir / CUSTOM_TROPHY / "Notice.txt");
-    if (notice_file.is_open()) {
-        notice_file
-            << "++++++++++++++++++++++++++++++++\n+ Custom Trophy Images / Sound "
-               "+\n++++++++++++++++++++++++++++++++\n\nYou can add custom images to the "
-               "trophies.\n*We recommend a square resolution image, for example 200x200, 500x500, "
-               "the same size as the height and width.\nIn this folder ('user\\custom_trophy'), "
-               "add the files with the following "
-               "names:\n\nbronze.png\nsilver.png\ngold.png\nplatinum.png\n\nYou can add a custom "
-               "sound for trophy notifications.\n*By default, no audio is played unless it is in "
-               "this folder and you are using the QT version.\nIn this folder "
-               "('user\\custom_trophy'), add the files with the following names:\n\ntrophy.mp3";
-        notice_file.close();
-    }
-
-    return paths;
-}();
+void SetUserDir(const fs::path& user_dir) {
+    UserPaths = MakeUserPaths(user_dir);
+}
 
 bool ValidatePath(const fs::path& path) {
     if (path.empty()) {
@@ -214,7 +177,7 @@ std::optional<fs::path> FindGameByID(const fs::path& dir, const std::string& gam
             }
             return std::nullopt;
         }
-        // gow3: packed (ZArchive) game images are not supported by the port.
+        // dcp: packed (ZArchive) game images are not supported by the port.
         return std::nullopt;
     };
 

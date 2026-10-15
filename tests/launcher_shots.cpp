@@ -1,5 +1,5 @@
-// DEBUG_SAULO: renders every launcher page into <out dir>/page_N_Name.png with a hidden window and exits, to check
-// the layout without a person: dcp-launcher-shots <app0> <image dir> <out dir>. Settings go to a temporary folder.
+// Renders every launcher page into <out dir>/page_N_Name.png with a hidden window and exits, to check the layout
+// without a person: dcp-launcher-shots <app0> <image dir> <out dir>. Settings go to a temporary folder.
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>

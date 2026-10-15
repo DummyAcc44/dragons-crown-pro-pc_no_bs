@@ -34,7 +34,7 @@ if ($Prepared) {
     if (Test-Path -LiteralPath $preparedDir) {
         foreach ($view in Get-ChildItem -LiteralPath $preparedDir -Directory) {
             if (-not (Test-Path -LiteralPath (Join-Path $view.FullName '.dcp_view.json'))) {
-                Write-Warn "skipping $($view.FullName): not a view made by prepare-game.ps1"
+                Write-Warn "skipping $($view.FullName): not a prepared game folder"
                 continue
             }
             Remove-Generated $view.FullName

@@ -5,7 +5,7 @@
 #ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in dcp_longjmp
- * (gpu/shim/gow3_toggles.h uses the same buffer type). */
+ * (gpu/shim/dcp_toggles.h uses the same buffer type). */
 typedef dcp_jmp_buf sigjmp_buf;
 #define sigsetjmp(buffer, save) dcp_setjmp(buffer)
 #else

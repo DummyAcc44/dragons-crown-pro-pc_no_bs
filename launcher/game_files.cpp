@@ -20,18 +20,6 @@ namespace {
 
 constexpr std::uintmax_t kMaxSmallFile = 4u << 20;
 
-// What a complete preparation (tools\prepare-game.ps1 -Scope full) leaves in game\prepared\v1.03.
-constexpr const char* kRequiredFiles[] = {
-    "eboot.bin",
-    "sce_discmap.plt",
-    "DRACRO.CPK",
-    "DRACRO_US.CPK",
-    "sce_module/libc.prx",
-    "sce_module/libSceFios2.prx",
-    "sce_module/libSceNpToolkit2.prx",
-    "sce_sys/param.sfo",
-};
-
 constexpr const char* kImageFiles[] = {"boot.bin", "content.bin", "image.json"};
 
 bool ReadSmallFile(const std::filesystem::path& path, std::string& out) {
@@ -55,12 +43,16 @@ uint32_t Le32(const unsigned char* p) {
            static_cast<uint32_t>(p[3]) << 24;
 }
 
-// A string value of param.sfo, empty when the key is absent or not a string.
-std::string SfoString(const std::string& sfo, const char* key) {
+struct SfoEntry {
+    uint16_t format = 0;
+    std::string value;
+};
+
+std::optional<SfoEntry> FindSfoEntry(const std::string& sfo, const char* key) {
     const auto* data = reinterpret_cast<const unsigned char*>(sfo.data());
     const size_t size = sfo.size();
     if (size < 20 || std::memcmp(data, "\0PSF", 4) != 0) {
-        return {};
+        return std::nullopt;
     }
     const uint32_t keys = Le32(data + 8), values = Le32(data + 12), count = Le32(data + 16);
     for (uint32_t i = 0; i < count && 20 + static_cast<size_t>(i) * 16 + 16 <= size; ++i) {
@@ -71,17 +63,11 @@ std::string SfoString(const std::string& sfo, const char* key) {
             continue;
         }
         const char* name = sfo.c_str() + keys + key_offset;
-        if (std::string_view(name, strnlen(name, size - keys - key_offset)) != key) {
-            continue;
+        if (std::string_view(name, strnlen(name, size - keys - key_offset)) == key) {
+            return SfoEntry{format, sfo.substr(values + offset, length)};
         }
-        if (format != 0x0204 && format != 0x0004) {
-            return {};
-        }
-        std::string text = sfo.substr(values + offset, length);
-        text.resize(text.find('\0') == std::string::npos ? text.size() : text.find('\0'));
-        return text;
     }
-    return {};
+    return std::nullopt;
 }
 
 bool IsRegularNonEmpty(const std::filesystem::path& path) {
@@ -98,6 +84,25 @@ GameCheck Result(GameFileState state, std::string detail, std::string sha = {}) 
 }
 
 } // namespace
+
+std::string SfoString(const std::string& sfo, const char* key) {
+    const std::optional<SfoEntry> entry = FindSfoEntry(sfo, key);
+    if (!entry || (entry->format != 0x0204 && entry->format != 0x0004)) {
+        return {};
+    }
+    return entry->value.substr(0, entry->value.find('\0'));
+}
+
+std::optional<uint32_t> SfoInteger(const std::string& sfo, const char* key, uint32_t absent) {
+    const std::optional<SfoEntry> entry = FindSfoEntry(sfo, key);
+    if (!entry) {
+        return absent;
+    }
+    if (entry->format != 0x0404 || entry->value.size() != 4) {
+        return std::nullopt;
+    }
+    return Le32(reinterpret_cast<const unsigned char*>(entry->value.data()));
+}
 
 std::string JsonString(const std::string& text, const std::string& key) {
     const std::string needle = "\"" + key + "\"";
@@ -158,13 +163,64 @@ const char* StateName(GameFileState state) {
     return "unknown";
 }
 
+GameCheck CheckGameTree(const std::filesystem::path& app0, const GameFingerprint& expected) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(app0, ec)) {
+        return Result(GameFileState::kMissing, "game folder not found");
+    }
+    std::string sfo;
+    if (!ReadSmallFile(app0 / "sce_sys" / "param.sfo", sfo)) {
+        return Result(std::filesystem::exists(app0 / "sce_sys" / "param.sfo", ec) ? GameFileState::kReadError
+                                                                                  : GameFileState::kMissing,
+                      "cannot read sce_sys/param.sfo");
+    }
+    if (GameCheck identity = CheckSfoIdentity(sfo, expected); identity.state != GameFileState::kValid) {
+        return identity;
+    }
+
+    for (const char* name : kGameFiles) {
+        if (!IsRegularNonEmpty(app0 / name)) {
+            return Result(GameFileState::kMissing, std::string("missing ") + name);
+        }
+    }
+
+    const std::string sha = Sha256Hex(app0 / "eboot.bin");
+    if (sha.empty()) {
+        return Result(GameFileState::kReadError, "cannot read eboot.bin");
+    }
+    if (sha != expected.eboot_sha256) {
+        return Result(GameFileState::kDifferentVersion, "eboot.bin is not the supported build", sha);
+    }
+    return Result(GameFileState::kValid, {}, sha);
+}
+
+GameCheck CheckSfoIdentity(const std::string& sfo, const GameFingerprint& expected) {
+    const struct {
+        const char* key;
+        std::string_view wanted;
+    } identity[] = {
+        {"TITLE_ID", expected.title_id},
+        {"CONTENT_ID", expected.content_id},
+        {"APP_VER", expected.app_ver},
+        {"VERSION", expected.sfo_version},
+    };
+    for (const auto& item : identity) {
+        const std::string found = SfoString(sfo, item.key);
+        if (found != item.wanted) {
+            return Result(GameFileState::kDifferentVersion, std::string("param.sfo ") + item.key + " is " +
+                                                                (found.empty() ? "missing" : found));
+        }
+    }
+    return Result(GameFileState::kValid, {});
+}
+
 GameCheck CheckGameFiles(const GamePaths& paths, const GameFingerprint& expected) {
     std::error_code ec;
     if (!std::filesystem::is_directory(paths.app0, ec)) {
         return Result(GameFileState::kMissing, "game folder not found");
     }
 
-    const std::filesystem::path marker_file = paths.app0 / ".dcp_view.json";
+    const std::filesystem::path marker_file = paths.app0 / kPreparedMarker;
     if (!std::filesystem::exists(marker_file, ec)) {
         return Result(GameFileState::kMissing, "game folder has no preparation marker");
     }
@@ -184,43 +240,11 @@ GameCheck CheckGameFiles(const GamePaths& paths, const GameFingerprint& expected
         return Result(GameFileState::kMissing, "only the " + scope + " files were prepared");
     }
 
-    std::string sfo;
-    if (!ReadSmallFile(paths.app0 / "sce_sys" / "param.sfo", sfo)) {
-        return Result(std::filesystem::exists(paths.app0 / "sce_sys" / "param.sfo", ec) ? GameFileState::kReadError
-                                                                                          : GameFileState::kMissing,
-                      "cannot read sce_sys/param.sfo");
+    const GameCheck tree = CheckGameTree(paths.app0, expected);
+    if (tree.state != GameFileState::kValid) {
+        return tree;
     }
-    const struct {
-        const char* key;
-        std::string_view wanted;
-    } identity[] = {
-        {"TITLE_ID", expected.title_id},
-        {"CONTENT_ID", expected.content_id},
-        {"APP_VER", expected.app_ver},
-        {"VERSION", expected.sfo_version},
-    };
-    for (const auto& item : identity) {
-        const std::string found = SfoString(sfo, item.key);
-        if (found != item.wanted) {
-            return Result(GameFileState::kDifferentVersion, std::string("param.sfo ") + item.key + " is " +
-                                                                (found.empty() ? "missing" : found));
-        }
-    }
-
-    for (const char* name : kRequiredFiles) {
-        if (!IsRegularNonEmpty(paths.app0 / name)) {
-            return Result(GameFileState::kMissing, std::string("missing ") + name);
-        }
-    }
-
-    const std::string sha = Sha256Hex(paths.app0 / "eboot.bin");
-    if (sha.empty()) {
-        return Result(GameFileState::kReadError, "cannot read eboot.bin");
-    }
-    if (sha != expected.eboot_sha256) {
-        return Result(GameFileState::kDifferentVersion, "eboot.bin is not the supported build", sha);
-    }
-
+    const std::string& sha = tree.eboot_sha256;
     for (const char* name : kImageFiles) {
         if (!IsRegularNonEmpty(paths.image_dir / name)) {
             return Result(GameFileState::kMissing, std::string("boot image: missing ") + name, sha);

@@ -9,7 +9,7 @@
 #include "video_core/host_shaders/depth_stencil_resample_frag.h"
 #include "video_core/host_shaders/depth_stencil_bits_frag.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
-#include "gow3_toggles.h"
+#include "dcp_toggles.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -22,8 +22,6 @@ SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r, Lookup get)
     : instance{i}, scheduler{s}, runtime{r}, lookup{std::move(get)} {
     runtime.scene_targets = this;
-    const char* force = std::getenv("GOW3_SCENE_STENCIL_BITS");
-    force_stencil_bits = force && force[0] == '1';
     CreateResampleResources();
 }
 SceneTargets::~SceneTargets() {
@@ -57,15 +55,15 @@ bool SceneTargets::Blittable(vk::Format format) const {
 }
 bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
     const auto format = image.backing->image.image_ci.format;
-    if (!image.info.props.is_depth || (Blittable(format) && !force_stencil_bits)) return false;
+    if (!image.info.props.is_depth || Blittable(format)) return false;
     const auto features = Features(format);
     const auto required = vk::FormatFeatureFlagBits::eSampledImage |
                           vk::FormatFeatureFlagBits::eDepthStencilAttachment;
     // Without shader stencil export (e.g. Pascal) depth/stencil stays native: the eight-draw
-    // stencil resampler costs too much on such GPUs. GOW3_SCENE_STENCIL_BITS=1 forces it (tests).
+    // stencil resampler costs too much on such GPUs.
     return (features & required) == required &&
            (!(image.aspect_mask & vk::ImageAspectFlagBits::eStencil) ||
-            instance.IsShaderStencilExportSupported() || force_stencil_bits);
+            instance.IsShaderStencilExportSupported());
 }
 // 1 for the scene size, 2 for half resolution (the game's post-processing chain), else 0.
 // Half resolution needs a scene size that halves exactly: the proxy keeps the scene's factor,
@@ -73,7 +71,7 @@ bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
 static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene) {
     if (i.size.width == 1920 && i.size.height == 1080) return 1;
     if (i.size.width == 960 && i.size.height == 540 && scene.width % 2 == 0 &&
-        scene.height % 2 == 0 && !Gow3Toggle::Disabled(Gow3Toggle::SceneHalfRes)) {
+        scene.height % 2 == 0 && !DcpToggle::Disabled(DcpToggle::SceneHalfRes)) {
         return 2;
     }
     return 0;
@@ -153,11 +151,6 @@ void SceneTargets::Copy(Entry& e, VideoCore::Image& original, bool to_native) {
     scheduler.EndRendering();
     const Runtime::TransferMark mark{runtime, to_native ? "scene proxy resolve" : "scene proxy fill",
                                      original};
-    if (debug) {
-        std::printf("Scene %s: %s %ux%u level %u\n", to_native ? "resolve" : "fill",
-                    vk::to_string(original.info.pixel_format).c_str(), original.info.size.width,
-                    original.info.size.height, e.level);
-    }
     const vk::Image src = to_native ? vk::Image(e.image) : original.GetImage();
     const vk::Image dst = to_native ? original.GetImage() : vk::Image(e.image);
     if (ShaderResampled(original)) {

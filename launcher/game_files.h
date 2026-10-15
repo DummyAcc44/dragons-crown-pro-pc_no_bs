@@ -1,7 +1,9 @@
-// The one readiness check for the prepared game: the launcher, Play and (later) an installer all use it.
+// The one readiness check for the game: the launcher, Play and the installer all use it.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #include "game_profile.h"
@@ -25,6 +27,18 @@ struct GameCheck {
 // Reads the preparation marker, param.sfo and the boot image report, and hashes eboot.bin (about 21 MB). The game
 // data archives are only checked for presence: the marker records that their extraction finished.
 GameCheck CheckGameFiles(const GamePaths& paths, const GameFingerprint& expected = kSupportedGame);
+
+// The game itself, without a preparation marker or boot image: param.sfo, the required files and eboot.bin. The
+// installer checks what it unpacked or the folder the player chose with it.
+GameCheck CheckGameTree(const std::filesystem::path& app0, const GameFingerprint& expected = kSupportedGame);
+
+// TITLE_ID, CONTENT_ID, APP_VER and VERSION of a param.sfo: the installer checks a package's before unpacking it.
+GameCheck CheckSfoIdentity(const std::string& sfo, const GameFingerprint& expected = kSupportedGame);
+
+// A string value of param.sfo, empty when the key is absent or not a string.
+std::string SfoString(const std::string& sfo, const char* key);
+// An integer value of param.sfo: `absent` when the key is missing, nothing when it is not an integer.
+std::optional<uint32_t> SfoInteger(const std::string& sfo, const char* key, uint32_t absent);
 
 // Lower-case hex SHA-256 of a file, empty when it cannot be read.
 std::string Sha256Hex(const std::filesystem::path& file);

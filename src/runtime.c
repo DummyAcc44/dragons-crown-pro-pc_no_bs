@@ -85,7 +85,7 @@ void runtime_report(void) {
     printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
 }
 static ABI void init_env(void) {
-    /* prepare_image.py verified that the supplied libc export is a bare RET. */
+    /* The boot image builder verified that the supplied libc export is a bare RET. */
     ++calls_init;
     puts("Runtime: _init_env returned (verified libc implementation: RET)");
 }
@@ -179,7 +179,7 @@ static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     runtime_report();
     exit(status);
 }
-/* Imports are spelled NID#library by prepare_image.py, the same for every game. libScePosix
+/* Imports are spelled NID#library by the boot image builder, the same for every game. libScePosix
  * exports libkernel's symbols with the same contracts, so both share the libkernel key. */
 static const char *canonical_name(const char *name, char out[128]) {
     const char *posix=strstr(name,"#libScePosix");

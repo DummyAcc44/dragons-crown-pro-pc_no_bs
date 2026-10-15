@@ -1,5 +1,5 @@
 // The launcher's view of user\dcp.ini, the file the video core reads at start and its in-game menu writes.
-// Booleans are stored as 1/0 because the video core reads them with atoi.
+// The video core reads it the same way (gpu/shim/dcp_settings.cpp); booleans are written as 1/0.
 #pragma once
 
 #include <filesystem>
@@ -51,6 +51,9 @@ std::span<const ManagedSetting> ManagedSettings();
 
 // The launcher window's own placement, kept apart from the game's window settings and from Reset.
 bool IsLauncherPlacementSetting(std::string_view key);
+
+// False for a value the game would not accept for the key (it uses the default then, and so does the launcher).
+bool IsValidSetting(std::string_view key, std::string_view value);
 
 // Pending launcher edits over the saved values. Nothing is written until Save() or SaveNow(); lines of the file
 // the launcher does not manage (the in-game menu's keys, comments) are kept as they are.

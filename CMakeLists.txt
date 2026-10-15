@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(dragons_crown_pro_pc LANGUAGES C CXX)
-set(DCP_PORT_VERSION "0.1.0-dev")
+set(DCP_PORT_VERSION "0.1.0")
 
 if (NOT WIN32 OR NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "Build with MSYS2 CLANG64 (tools\build.ps1).")
@@ -12,6 +12,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
+# Repository paths in __FILE__ and std::source_location stay out of the binary; debug info keeps them.
+add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=>")
+
+if (NOT DCP_PORT_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "DCP_PORT_VERSION must start with MAJOR.MINOR.PATCH")
+endif()
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/generated/dcp_version.h CONTENT "#define DCP_VERSION_NUMBERS \
+${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0\n#define DCP_FILE_VERSION_STRING \
+\"${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}.0\"\n#define DCP_VERSION_STRING \"${DCP_PORT_VERSION}\"\n")
 
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Freetype REQUIRED)
@@ -42,11 +51,11 @@ set(DCP_RUNTIME_SOURCES
     src/runtime_time.c)
 
 enable_language(RC)
-# Relink when the application icon or the manifest changes.
+# Relink when the application icon, the manifest or the version changes.
 set_source_files_properties(src/dcp-loader.rc PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_SOURCE_DIR}/packaging/icons/app-icon.ico;${CMAKE_SOURCE_DIR}/src/dcp-loader.manifest")
+    "${CMAKE_SOURCE_DIR}/packaging/icons/app-icon.ico;${CMAKE_SOURCE_DIR}/src/dcp-loader.manifest;${CMAKE_BINARY_DIR}/generated/dcp_version.h")
 add_executable(dcp-loader src/loader.c ${DCP_RUNTIME_SOURCES} src/compat_win.c src/dcp-loader.rc)
-target_include_directories(dcp-loader PRIVATE src launcher)
+target_include_directories(dcp-loader PRIVATE src launcher ${CMAKE_BINARY_DIR}/generated)
 target_compile_options(dcp-loader PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror -fno-omit-frame-pointer>)
 # Windows 10 1903+ APIs (VirtualAlloc2, MapViewOfFile3).
 target_compile_definitions(dcp-loader PRIVATE _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000007)

@@ -63,7 +63,7 @@ $script:Toolchains = [ordered]@{
 $script:BuildTools = @('clang.exe', 'cmake.exe', 'ninja.exe', 'pkgconf.exe', 'SDL3.dll', 'glslang.exe', 'vulkan-1.dll', 'libfreetype-6.dll')
 $script:Clang64Packages = 'mingw-w64-clang-x86_64-{toolchain,cmake,ninja,pkgconf,sdl3,freetype} ' +
     'mingw-w64-clang-x86_64-{vulkan-headers,vulkan-loader,vulkan-memory-allocator,glslang} ' +
-    'mingw-w64-clang-x86_64-{fmt,boost,robin-map,xxhash,ffmpeg,zydis,spirv-tools,spirv-headers,spirv-cross}'
+    'mingw-w64-clang-x86_64-{fmt,boost,robin-map,xxhash,libpng,zydis,spirv-tools,spirv-headers,spirv-cross}'
 
 function Get-ToolchainStatus([string]$Name) {
     $info = $script:Toolchains[$Name]

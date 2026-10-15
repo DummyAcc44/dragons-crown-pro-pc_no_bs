@@ -21,7 +21,7 @@ struct HostOptions {
     int min_width = 900;
     int min_height = 560;
     std::optional<WindowPlacement> restore;  // used when it lies on a display
-    bool hidden = false;                     // DEBUG_SAULO: page screenshots without showing the window
+    bool hidden = false;                     // page screenshots without showing the window
 };
 
 class LauncherHost {

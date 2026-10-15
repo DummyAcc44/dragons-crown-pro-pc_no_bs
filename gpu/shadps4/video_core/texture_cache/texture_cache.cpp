@@ -4,7 +4,7 @@
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
-#include "gow3_toggles.h"
+#include "dcp_toggles.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -105,9 +105,9 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
     if (!deferred_readbacks || !has_pending_readbacks.load(std::memory_order_acquire)) return false;
     {
         std::scoped_lock lock{readback_mutex};
-        // Stale mode, byte rule: God of War III writes every frame to the page that holds a
-        // 1x1 exposure copy, but not to its bytes. That write need not wait for the GPU: the
-        // copy only stops protecting its page and is still published when the GPU is done.
+        // Stale mode, byte rule: a CPU write to the page of a pending copy, but not to its
+        // bytes, need not wait for the GPU: the copy only stops protecting its page and is
+        // still published when the GPU is done.
         if (stale_readbacks && source == ReadbackSource::CpuWrite) {
             readbacks_released += pending_readbacks.ReleaseOutside(address, size, 64_KB,
                 [this](auto& entry) { WatchReadback<false>(entry.address, entry.size); });
@@ -127,7 +127,7 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
                 }
             }
         }
-        Gow3Stats::Timer readback_timer{Gow3Stats::t_readback_wait};
+        DcpStats::Timer readback_timer{DcpStats::t_readback_wait};
         if (const u64 tick = pending_readbacks.RequiredTick(address, size)) {
             ++readbacks_waited;
             waited = !scheduler.IsFree(tick);
@@ -156,8 +156,8 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size) {
     });
 }
 
-// gow3: every copy is recorded first and the GPU is waited for once. A wait per image (as
-// before) left the GPU mostly idle in God of War III's gameplay, at about 2 FPS.
+// dcp: every copy is recorded first and the GPU is waited for once: a wait per image left the
+// GPU mostly idle.
 void TextureCache::ProcessDownloadImages() {
     if (deferred_readbacks) {
         // Upload workers must finish reading RAM before these pages become inaccessible.
@@ -330,7 +330,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     }
 }
 
-// gow3: images sharing guest memory (aliases), ported from cuesta4/shadPS4 (eltutz) commit
+// dcp: images sharing guest memory (aliases), ported from cuesta4/shadPS4 (eltutz) commit
 // 189ca3b6. A write to one is copied into the others before they are read, as on the PS4,
 // where they are the same memory.
 static bool Covers(const Extent3D& extent, const ImageInfo& info) {
@@ -881,7 +881,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         cached.format == info.pixel_format && cached.type == info.type &&
         cached.exact_fmt == exact_fmt && cached.binding == desc.type &&
         cached.levels == info.resources.levels && cached.layers == info.resources.layers &&
-        !Gow3Toggle::Disabled(Gow3Toggle::FindImageCache)) {
+        !DcpToggle::Disabled(DcpToggle::FindImageCache)) {
         Image& image = slot_images[cached.image_id];
         image.tick_accessed_last = scheduler.CurrentTick();
         TouchImage(image);
@@ -1036,7 +1036,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     if (desc.type == BindingType::Storage) {
         PublishAliasWrite(image_id);
     }
-    if (memo && !Gow3Toggle::Disabled(Gow3Toggle::TextureViewMemo)) {
+    if (memo && !DcpToggle::Disabled(DcpToggle::TextureViewMemo)) {
         if (memo->image_id == image_id && memo->backing == image.backing && memo->view_id) {
             return slot_image_views[memo->view_id];
         }
@@ -1124,7 +1124,7 @@ void TextureCache::RefreshImage(Image& image) {
     }
     ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
                      ReadbackSource::ImageRefresh);
-    Gow3Stats::Timer timer{Gow3Stats::t_refresh};
+    DcpStats::Timer timer{DcpStats::t_refresh};
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
@@ -1154,7 +1154,7 @@ void TextureCache::RefreshImage(Image& image) {
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
-    Gow3Stats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+    DcpStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
     for (u32 m = 0; m < num_mips; m++) {
         const u32 width = std::max(image.info.size.width >> m, 1u);
@@ -1227,7 +1227,7 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {
-    Gow3Stats::images_registered.fetch_add(1, std::memory_order_relaxed);
+    DcpStats::images_registered.fetch_add(1, std::memory_order_relaxed);
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
@@ -1395,21 +1395,15 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
 }
 
 void TextureCache::GarbageCollectImages() {
-    Gow3Stats::Timer gc_timer{Gow3Stats::t_gc};
+    DcpStats::Timer gc_timer{DcpStats::t_gc};
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
-        // gow3: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
-        // much more than images (buffers backing guest memory), and the startup budget left
-        // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
-        // collector evicted images used two or three frames ago on every submission and wrote
-        // GPU-written ones back. Compare with the driver's current budget instead.
-        // GOW3_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop).
-        static const u64 forced_budget = [] {
-            const char* env = std::getenv("GOW3_GC_BUDGET_MB");
-            return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
-        }();
-        if (instance.IsIntegrated() || forced_budget) {
-            const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
+        // dcp: on integrated GPUs the usage covers system-memory heaps holding much more than
+        // images (buffers backing guest memory): against the startup budget it stayed above the
+        // critical mark and recent images were evicted on every submission. The driver's current
+        // budget is compared instead.
+        if (instance.IsIntegrated()) {
+            const u64 budget = instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;
                 pressure_gc_memory = budget / 100 * 85;
@@ -1451,7 +1445,7 @@ void TextureCache::GarbageCollectImages() {
             return false;
         }
         if (download) {
-            // gow3: synchronously, while the image still protects its pages. A deferred
+            // dcp: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
             // had meanwhile stored there (e.g. its heap after unloading an area).
             DownloadImageMemory(image_id, true);
@@ -1482,7 +1476,7 @@ void TextureCache::GarbageCollectImages() {
         configure(true);
         lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
     }
-    // gow3: evictions under memory pressure, at most every 5 s (GOW3_FRAME_STATS or not).
+    // dcp: evictions under memory pressure, at most every 5 s (DCP_FRAME_STATS or not).
     if (pressured || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {

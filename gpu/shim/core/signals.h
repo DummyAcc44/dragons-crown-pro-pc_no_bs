@@ -1,4 +1,4 @@
-// gow3: fault-handler registry. The C loader's SIGSEGV handler calls
+// dcp: fault-handler registry. The C loader's SIGSEGV handler calls
 // dcpgpu_handle_fault() first; registered handlers run in priority order.
 #pragma once
 #include <compare>

@@ -21,8 +21,11 @@
 #include <vector>
 
 #include "dcp_launcher.h"
-#include "gow3_graphics.h"
+#include "dcp_graphics.h"
+#include "dcp_png.h"
+#include "dcp_settings.h"
 #include "game_files.h"
+#include "game_install.h"
 #include "options.h"
 #include "paths.h"
 #include "placement.h"
@@ -240,6 +243,11 @@ void TestFingerprintMatchesProfile() {
     CHECK(profile.find("'sfo_version': '" + std::string(kSupportedGame.sfo_version) + "'") != std::string::npos);
     CHECK(profile.find("'" + std::string(kSupportedGame.version) + "': {") != std::string::npos);
     CHECK(kSupportedGame.eboot_sha256.size() == 64);
+    std::string modules = "'modules': (";
+    for (const char* module : kBundledModules) {
+        modules += std::string(module == kBundledModules[0] ? "" : ", ") + "'" + module + "'";
+    }
+    CHECK(profile.find(modules + ")") != std::string::npos);
 }
 
 void TestSettings(const fs::path& base) {
@@ -265,7 +273,7 @@ void TestSettings(const fs::path& base) {
     {
         LauncherSettings settings(file);
         CHECK(settings.GetBool(kVSyncKey, false));
-        CHECK(settings.Get(kDisplayModeKey) == "borderless"); // exclusive fullscreen reads as Borderless Fullscreen
+        CHECK(settings.Get(kDisplayModeKey, "windowed") == "windowed"); // not a mode the game accepts: the default
 
         settings.SetBool(kVSyncKey, false);
         settings.SetInt(kWindowWidthKey, 2560);
@@ -290,10 +298,10 @@ void TestSettings(const fs::path& base) {
         CHECK(reread.GetInt(kWindowHeightKey, 0) == 1440);
         CHECK(reread.GetInt(kMonitorKey, 0) == 2);
         CHECK(reread.GetBool(kShowFpsTitleKey, false));
-        CHECK(reread.Get(kDisplayModeKey) == "borderless");
+        CHECK(reread.Get(kDisplayModeKey, "windowed") == "windowed");
     }
 
-    // Booleans are 1/0: the video core reads them with atoi.
+    // Booleans are written as 1/0.
     {
         LauncherSettings settings(file);
         settings.SetBool(kSharpenKey, false);
@@ -470,42 +478,371 @@ void TestLogRedirect(const fs::path& base) {
     CHECK(text.find("stdout marker\nstderr marker\n") != std::string::npos);
 }
 
-// The safe video core defaults live in the loader, not in the development scripts.
-void TestRuntimeDefaultsLiveInTheLoader() {
-    const std::string loader = ReadAll(fs::path(DCP_SOURCE_DIR) / "src" / "loader.c");
-    for (const char* line : {"default_env(\"GOW3_UPSCALER\", \"none\")", "default_env(\"GOW3_READBACK_LINEAR\", \"1\")",
-                             "default_env(\"GOW3_VBLANK_HZ\", \"60\")"}) {
-        CHECK(loader.find(line) != std::string::npos);
+// Every environment variable the loader, the runtime, the launcher and the video core read is one of this
+// project's DCP_* names, and none of them can bring back an inherited setting that changes the rendering.
+void TestEnvironmentVariables() {
+    const fs::path source(DCP_SOURCE_DIR);
+    // Unix/macOS branches of vendored shadPS4 code; never built for Windows.
+    const std::vector<std::string> platform = {"HOME", "XDG_DATA_HOME", "VK_DRIVER_FILES"};
+    std::vector<std::string> names, inherited;
+    int files = 0;
+    for (const char* dir : {"src", "launcher", "gpu/shim", "gpu/shadps4"}) {
+        for (const auto& entry : fs::recursive_directory_iterator(source / dir)) {
+            const std::string ext = entry.path().extension().string();
+            if (!entry.is_regular_file() ||
+                (ext != ".c" && ext != ".cpp" && ext != ".h" && ext != ".hpp")) {
+                continue;
+            }
+            ++files;
+            const std::string text = ReadAll(entry.path());
+            if (text.find("GOW3_") != std::string::npos) {
+                inherited.push_back(entry.path().string());
+            }
+            for (const char* call : {"getenv(\"", "Flag(\""}) {
+                for (size_t at = text.find(call); at != std::string::npos; at = text.find(call, at + 1)) {
+                    const size_t begin = at + std::strlen(call);
+                    names.push_back(text.substr(begin, text.find('"', begin) - begin));
+                }
+            }
+        }
     }
-    CHECK(ReadAll(fs::path(DCP_SOURCE_DIR) / "scripts" / "run_game.py").find("GOW3_") == std::string::npos);
-    CHECK(ReadAll(fs::path(DCP_SOURCE_DIR) / "scripts" / "game_profiles.py").find("GOW3_") == std::string::npos);
+    CHECK(files > 400);
+    CHECK(std::find(names.begin(), names.end(), "DCP_FRAME_STATS") != names.end()); // the scan sees the reads
+    for (const std::string& path : inherited) {
+        std::printf("GOW3_ name in %s\n", path.c_str());
+    }
+    CHECK(inherited.empty());
+    std::vector<std::string> unexpected;
+    for (const std::string& name : names) {
+        bool ok = name.rfind("DCP_", 0) == 0 || std::find(platform.begin(), platform.end(), name) != platform.end();
+        for (const char* forbidden : {"ASYNC", "WORKER", "FRAMES", "FPS", "VBLANK", "UPSCAL", "READBACK", "CONFIG",
+                                      "GPU_ID", "PRESENT", "RECORD_THREAD", "DRAW_PIPE"}) {
+            ok = ok && name.find(forbidden) == std::string::npos;
+        }
+        if (!ok) {
+            std::printf("unexpected environment variable %s\n", name.c_str());
+            unexpected.push_back(name);
+        }
+    }
+    CHECK(unexpected.empty());
 }
 
+// The fixes that made the game correct are code, not settings.
 void TestCorrectnessStaysFixed() {
     const fs::path source(DCP_SOURCE_DIR);
-    const std::string settings = ReadAll(source / "gpu" / "shim" / "gow3_settings.cpp");
-    CHECK(settings.find("key == \"async_shaders\"") == std::string::npos);
-    CHECK(settings.find("GOW3_ASYNC_SHADERS") == std::string::npos);
-    CHECK(settings.find("key == \"fps_limit\"") == std::string::npos);
-    CHECK(settings.find("key == \"frames_queued\"") == std::string::npos);
-    CHECK(settings.find("GOW3_FRAMES_AHEAD") == std::string::npos);
-    CHECK(ReadAll(source / "gpu" / "shim" / "gow3_settings.h").find("fps_limit{0}") != std::string::npos);
-    CHECK(ReadAll(source / "gpu" / "shim" / "gow3_settings.h").find("frames_queued{1}") != std::string::npos);
+    const fs::path renderer = source / "gpu" / "shadps4" / "video_core" / "renderer_vulkan";
+    CHECK(ReadAll(renderer / "vk_pipeline_cache.cpp")
+              .find("bool PipelineCache::AsyncCompilation() const {\n    return false;\n}") != std::string::npos);
+    CHECK(ReadAll(renderer / "vk_draw_prep.cpp").find("constexpr u32 WorkerCount = 0;") != std::string::npos);
+    const std::string presenter = ReadAll(renderer / "vk_presenter.cpp");
+    CHECK(presenter.find("draw_scheduler.Wait(previous_frame_tick);") != std::string::npos);
+    // The redrawn last frame leaves the free queue while it is shown; the swapchain waits for the device only
+    // under the queue submission lock.
+    CHECK(presenter.find("free_queue.erase(it);") != std::string::npos);
+    const std::string swapchain = ReadAll(renderer / "vk_swapchain.cpp");
+    const size_t wait = swapchain.find("waitIdle()");
+    CHECK(wait != std::string::npos && swapchain.find("waitIdle()", wait + 1) == std::string::npos);
+    CHECK(swapchain.rfind("std::scoped_lock lock{Scheduler::submit_mutex};", wait) != std::string::npos);
     const std::string emulator = ReadAll(source / "gpu" / "shim" / "core" / "emulator_settings.h");
     CHECK(emulator.find("u32 GetFrameLimit() { return 0; }") != std::string::npos);
-    CHECK(emulator.find("GOW3_FPS_LIMIT") == std::string::npos);
     CHECK(emulator.find("u32 GetVblankFrequency() { return 60; }") != std::string::npos);
-    CHECK(ReadAll(source / "gpu" / "shadps4" / "core" / "libraries" / "videoout" / "driver.cpp")
-              .find("getenv(\"GOW3_FPS_LIMIT\")") == std::string::npos);
-    const std::string menu = ReadAll(source / "gpu" / "shim" / "gow3_overlay.cpp");
-    CHECK(menu.find("Frame rate limit") == std::string::npos);
-    CHECK(menu.find("Frames queued") == std::string::npos);
-    CHECK(ReadAll(source / "gpu" / "shim" / "gow3_settings.h").find("async_shaders{false}") != std::string::npos);
-    CHECK(ReadAll(source / "gpu" / "shim" / "gow3_overlay.cpp").find("Compile new shaders") == std::string::npos);
+    CHECK(emulator.find("bool IsReadbackLinearImagesEnabled() { return true; }") != std::string::npos);
+    CHECK(emulator.find("s32 GetGpuId() { return -1; }") != std::string::npos);
+    const std::string menu = ReadAll(source / "gpu" / "shim" / "dcp_overlay.cpp");
+    for (const char* stale : {"Frame rate limit", "Frames queued", "Compile new shaders", "Performance",
+                              "Upscaler", "Uncharted", "God of War", "fps_limit", "frames_queued"}) {
+        CHECK(menu.find(stale) == std::string::npos);
+    }
     const std::string launcher = ReadAll(source / "launcher" / "launcher.cpp");
     for (const char* hidden : {"async", "workers", "frame_limit", "fps_limit", "engine_fps", "frames_queued"}) {
         CHECK(launcher.find(hidden) == std::string::npos);
     }
+    // The menu, the F11 save and the launcher only ever write these keys.
+    for (const char* key : {"async_shaders", "fps_limit", "frames_queued", "upscaler", "engine_fps"}) {
+        CHECK(ReadAll(source / "gpu" / "shim" / "dcp_settings.cpp").find(std::string("\"") + key + "\"") ==
+              std::string::npos);
+    }
+}
+
+// A package header with param.sfo as its only entry, `declared` bytes long by its header.
+std::string MakePackage(const std::string& sfo, uint64_t declared = 0) {
+    std::string pkg(0x1020, '\0');
+    const auto be = [&](size_t at, uint64_t value, int bytes) {
+        for (int i = 0; i < bytes; ++i) {
+            pkg[at + i] = char(value >> (8 * (bytes - 1 - i)));
+        }
+    };
+    be(0x00, 0x7F434E54, 4);
+    be(0x10, 1, 4);      // entries
+    be(0x18, 0x1000, 4); // entry table
+    be(0x1000, 0x1000, 4);
+    be(0x1010, 0x1020, 4);
+    be(0x1014, sfo.size(), 4);
+    pkg += sfo;
+    be(0x430, declared ? declared : pkg.size(), 8);
+    return pkg;
+}
+
+// The installer refuses packages and folders that are not the supported game and never leaves a half-installed game
+// behind: the previous installation stays as it was and no staging folder remains.
+void TestInstaller(const fs::path& base) {
+    Fixture source(base, "install-source");
+    const GamePaths target{base / "install-target" / "prepared" / "v1.03", base / "install-target" / "image" / "v1.03"};
+    WriteAll(target.app0 / kPreparedMarker, "previous");
+    WriteAll(target.image_dir / "boot.bin", "previous boot");
+    const auto unchanged = [&] {
+        return ReadAll(target.app0 / kPreparedMarker) == "previous" &&
+               ReadAll(target.image_dir / "boot.bin") == "previous boot" &&
+               !fs::exists(target.app0.parent_path() / "v1.03.install-temp") &&
+               !fs::exists(target.image_dir.parent_path() / "v1.03.install-temp");
+    };
+    const auto install = [&](const fs::path& from, const GamePaths& to, const InstallHooks& hooks = {}) {
+        return InstallGame(from, to, hooks, source.fingerprint).status;
+    };
+
+    fs::create_directories(base / "install-empty");
+    CHECK(install(base / "install-empty", target) == InstallStatus::kNotGameFolder);
+    // The synthetic eboot.bin is copied, then the boot image cannot be built from it.
+    CHECK(install(source.paths.app0, target) == InstallStatus::kPrepareFailed);
+    CHECK(unchanged());
+    InstallHooks cancel;
+    cancel.progress = [](uint64_t, uint64_t) { return false; };
+    CHECK(install(source.paths.app0, target, cancel) == InstallStatus::kCancelled);
+    CHECK(unchanged());
+
+    const fs::path inside = target.app0 / "copy";
+    WriteAll(inside / "eboot.bin", kEboot);
+    WriteAll(inside / "sce_sys" / "param.sfo", ReadAll(source.paths.app0 / "sce_sys" / "param.sfo"));
+    CHECK(install(inside, target) == InstallStatus::kOverlapping);
+    fs::remove_all(inside);
+
+    const GamePaths foreign{base / "install-foreign" / "v1.03", base / "install-foreign" / "image"};
+    WriteAll(foreign.app0 / "notes.txt", "mine");
+    CHECK(install(source.paths.app0, foreign) == InstallStatus::kForeignFolder);
+    CHECK(ReadAll(foreign.app0 / "notes.txt") == "mine");
+
+    const auto sfo_with = [](const char* title_id, const char* app_ver) {
+        return MakeSfo({{"TITLE_ID", title_id},
+                        {"CONTENT_ID", std::string(kSupportedGame.content_id)},
+                        {"APP_VER", app_ver},
+                        {"VERSION", std::string(kSupportedGame.sfo_version)}});
+    };
+    WriteAll(source.paths.app0 / "sce_sys" / "param.sfo", sfo_with("CUSA00001", "01.00"));
+    CHECK(install(source.paths.app0, target) == InstallStatus::kWrongGame);
+    WriteAll(source.paths.app0 / "sce_sys" / "param.sfo", sfo_with("CUSA10454", "01.01"));
+    CHECK(install(source.paths.app0, target) == InstallStatus::kWrongVersion);
+    source.Rebuild();
+    fs::remove(source.paths.app0 / "DRACRO.CPK");
+    CHECK(install(source.paths.app0, target) == InstallStatus::kIncomplete);
+    CHECK(unchanged());
+    CHECK(std::string(DescribeInstall(InstallStatus::kNotGameFolder).text).find("eboot.bin") != std::string::npos);
+
+    const fs::path pkg = base / "install-packages";
+    const std::string sfo = ReadAll(source.paths.app0 / "sce_sys" / "param.sfo");
+    WriteAll(pkg / "notes.pkg", "not a package");
+    CHECK(install(pkg / "notes.pkg", target) == InstallStatus::kNotPackage);
+    CHECK(install(pkg / "missing.pkg", target) == InstallStatus::kNotPackage);
+    WriteAll(pkg / "short.pkg", MakePackage(sfo, 6ull << 30));
+    CHECK(install(pkg / "short.pkg", target) == InstallStatus::kIncomplete);
+    WriteAll(pkg / "other.pkg", MakePackage(sfo_with("CUSA00001", "01.00")));
+    CHECK(install(pkg / "other.pkg", target) == InstallStatus::kWrongGame);
+    WriteAll(pkg / "patch.pkg", MakePackage(sfo_with("CUSA10454", "01.03")));
+    CHECK(install(pkg / "patch.pkg", target) == InstallStatus::kWrongVersion);
+    // The right game without the fake-package keys, as a package encrypted for a console looks here.
+    WriteAll(pkg / "console.pkg", MakePackage(sfo));
+    CHECK(install(pkg / "console.pkg", target) == InstallStatus::kUnsupportedPackage);
+    WriteAll(target.app0 / "game.pkg", MakePackage(sfo));
+    CHECK(install(target.app0 / "game.pkg", target) == InstallStatus::kOverlapping);
+    fs::remove(target.app0 / "game.pkg");
+    CHECK(unchanged());
+
+    // The real package, when the development tree has it: cancelled during unpacking, nothing changes.
+    const fs::path real = fs::path(DCP_SOURCE_DIR) / "game" / "Dragons.Crown.Pro.PS4-DUPLEX.pkg";
+    if (fs::exists(real)) {
+        InstallHooks cancel_unpacking;
+        bool unpacking = false;
+        cancel_unpacking.progress = [&](uint64_t done, uint64_t) { return !(unpacking = done > 0); };
+        CHECK(InstallGame(real, target, cancel_unpacking).status == InstallStatus::kCancelled);
+        CHECK(unpacking);
+        CHECK(unchanged());
+    }
+}
+
+// The save list's pictures: a PNG decodes to RGBA rows (the icon's accent colour, its transparent corner), anything
+// else is refused.
+void TestPngDecoder() {
+    const fs::path icon = fs::path(DCP_SOURCE_DIR) / "packaging" / "icons" / "app-icon-32.png";
+    DcpPng::Image image;
+    CHECK(DcpPng::LoadRgba(icon.string().c_str(), image));
+    CHECK(image.width == 32 && image.height == 32 && image.rgba.size() == 32u * 32u * 4u);
+    bool accent = false;
+    for (size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
+        accent |= image.rgba[i] == 0xE0 && image.rgba[i + 1] == 0xBB && image.rgba[i + 2] == 0x32 &&
+                  image.rgba[i + 3] == 0xFF;
+    }
+    CHECK(accent);
+    CHECK(!image.rgba.empty() && image.rgba[3] == 0);
+    const unsigned char truncated[] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n', 0, 0, 0, 13};
+    CHECK(!DcpPng::DecodeRgba(truncated, sizeof(truncated), image) && image.rgba.empty());
+    CHECK(!DcpPng::LoadRgba((icon.string() + ".missing").c_str(), image));
+}
+
+// The video core reads dcp.ini as the launcher does, falls back to the defaults on values it does not accept and
+// writes only the keys the in-game menu changes.
+void TestVideoCoreSettings(const fs::path& base) {
+    const fs::path file = base / "video-core" / "dcp.ini";
+    fs::remove_all(file.parent_path());
+    {
+        DcpSettings::Values v;
+        CHECK(!DcpSettings::Read(file.string(), v)); // no file: the defaults stay
+        CHECK(v.vsync && !v.fsr1 && v.rcas && v.rcas_strength == 75 && !v.smaa && v.anisotropy == 0);
+        CHECK(v.display_mode == DcpGraphics::Windowed && v.graphics_card.empty() && v.monitor == 1);
+        CHECK(!v.show_fps && !v.show_fps_title && v.requested_width == 0 && v.requested_height == 0);
+    }
+    WriteAll(file,
+             "# Dragon's Crown Pro user settings\n"
+             "vsync = 0\n"
+             "fsr1=1\n"
+             "rcas = off\n"
+             "rcas_strength = 40\n"
+             "smaa = yes\n"
+             "anisotropy = 16\n"
+             "display_mode = borderless\n"
+             "graphics_card = Intel(R) UHD Graphics 730 # the integrated one\n"
+             "monitor = 2\n"
+             "window_width = 2560\n"
+             "window_height = 1440\n"
+             "show_fps = true\n"
+             "show_fps_title = 1\n"
+             "overlay_scale = 150\n"
+             "overlay_corner = 3\n"
+             "menu_tab = 1\n"
+             "upscaler = fsr3\n"
+             "async_shaders = 1\n"
+             "fps_limit = 30\n"
+             "frames_queued = 0\n");
+    {
+        DcpSettings::Values v;
+        CHECK(DcpSettings::Read(file.string(), v));
+        CHECK(!v.vsync && v.fsr1 && !v.rcas && v.rcas_strength == 40 && v.smaa && v.anisotropy == 16);
+        CHECK(v.display_mode == DcpGraphics::Borderless);
+        CHECK(v.graphics_card == "Intel(R) UHD Graphics 730"); // a trailing " # comment" is not part of the value
+        CHECK(v.monitor == 2 && v.requested_width == 2560 && v.requested_height == 1440);
+        CHECK(v.show_fps && v.show_fps_title && v.overlay_scale == 150 && v.overlay_corner == 3 && v.menu_tab == 1);
+    }
+
+    // Values the game does not accept fall back to the defaults; the last of duplicate keys wins (as in the launcher).
+    WriteAll(file,
+             "vsync = maybe\n"
+             "rcas = 2\n"
+             "rcas_strength = 150\n"
+             "anisotropy = 3\n"
+             "display_mode = fullscreen\n"
+             "graphics_card = automatic\n"
+             "monitor = 0\n"
+             "window_width = -5\n"
+             "overlay_scale = 9000\n"
+             "overlay_corner = 7\n"
+             "menu_tab = 2\n"
+             "smaa = 1\n"
+             "smaa = 0\n"
+             "not a setting line\n"
+             "= 1\n");
+    {
+        DcpSettings::Values v;
+        CHECK(DcpSettings::Read(file.string(), v));
+        CHECK(v.vsync && v.rcas && v.rcas_strength == 75 && v.anisotropy == 0);
+        CHECK(v.display_mode == DcpGraphics::Windowed && v.graphics_card.empty() && v.monitor == 1);
+        CHECK(v.requested_width == 0 && v.overlay_scale == 300 && v.overlay_corner == 1 && v.menu_tab == 0);
+        CHECK(!v.smaa);
+    }
+
+    // The launcher and the video core read the same file the same way.
+    {
+        LauncherSettings settings(file);
+        settings.Set(kDisplayModeKey, "borderless");
+        settings.SetBool(kVSyncKey, false);
+        settings.Set(kAnisotropyKey, "8");
+        settings.Set(kGraphicsCardKey, "NVIDIA GeForce RTX 4070");
+        CHECK(settings.Save());
+        DcpSettings::Values v;
+        CHECK(DcpSettings::Read(file.string(), v));
+        CHECK(v.display_mode == DcpGraphics::Borderless && !v.vsync && v.anisotropy == 8);
+        CHECK(v.graphics_card == "NVIDIA GeForce RTX 4070");
+    }
+
+    // The menu's save and the F11 save rewrite their own keys in place and keep every other line.
+    WriteAll(file,
+             "# header kept\n"
+             "show_launcher = 0\n"
+             "display_mode = windowed\n"
+             "render_resolution = 4K\n"
+             "launcher_width = 1280\n");
+    DcpSettings::Load(file.string());
+    auto& live = DcpSettings::Get();
+    live.display_mode = DcpGraphics::Borderless;
+    CHECK(DcpSettings::SaveDisplayMode());
+    {
+        const std::string text = ReadAll(file);
+        CHECK(text.find("display_mode = borderless\n") != std::string::npos);
+        CHECK(text.find("display_mode = windowed") == std::string::npos);
+        CHECK(text.find("# header kept\n") == 0);
+        CHECK(text.find("render_resolution = 4K") != std::string::npos);
+        CHECK(text.find("vsync") == std::string::npos); // F11 writes the display mode alone
+    }
+    live.vsync = false;
+    live.rcas_strength = 30;
+    live.show_fps = true;
+    CHECK(DcpSettings::Save());
+    {
+        const std::string text = ReadAll(file);
+        CHECK(text.find("vsync = 0") != std::string::npos);
+        CHECK(text.find("rcas_strength = 30") != std::string::npos);
+        CHECK(text.find("show_fps = 1") != std::string::npos);
+        CHECK(text.find("launcher_width = 1280") != std::string::npos && text.find("show_launcher = 0") != std::string::npos);
+        for (const char* never : {"smaa", "anisotropy", "graphics_card", "monitor", "window_width", "upscaler",
+                                  "async_shaders", "fps_limit", "frames_queued"}) {
+            CHECK(text.find(never) == std::string::npos);
+        }
+        LauncherSettings reread(file);
+        CHECK(reread.Get(kDisplayModeKey) == "borderless" && !reread.GetBool(kVSyncKey, true));
+        CHECK(reread.GetInt(kSharpenStrengthKey, 0) == 30 && reread.GetBool(kShowFrameCounterKey, false));
+        CHECK(reread.GetBool(kShowLauncherKey, true) == false);
+    }
+}
+
+// One default per setting: what the launcher shows for a missing key is what the game uses.
+void TestDefaultsAgree() {
+    const DcpSettings::Values game;
+    const auto launcher_default = [](std::string_view key) {
+        for (const ManagedSetting& setting : ManagedSettings()) {
+            if (setting.key == key) {
+                return std::string(setting.default_value);
+            }
+        }
+        return std::string("<missing>");
+    };
+    const auto flag = [](bool value) { return std::string(value ? "1" : "0"); };
+    CHECK(launcher_default(kDisplayModeKey) == std::string(DcpGraphics::DisplayModeKeys[game.display_mode]));
+    CHECK(launcher_default(kVSyncKey) == flag(game.vsync));
+    CHECK(launcher_default(kUpscaleKey) == flag(game.fsr1));
+    CHECK(launcher_default(kSharpenKey) == flag(game.rcas));
+    CHECK(launcher_default(kSharpenStrengthKey) == std::to_string(game.rcas_strength.load()));
+    CHECK(launcher_default(kAntiAliasingKey) == flag(game.smaa));
+    CHECK(launcher_default(kAnisotropyKey) == std::to_string(game.anisotropy.load()));
+    CHECK(launcher_default(kGraphicsCardKey) == "automatic" && game.graphics_card.empty());
+    CHECK(launcher_default(kMonitorKey) == std::to_string(game.monitor.load()));
+    CHECK(launcher_default(kShowFpsTitleKey) == flag(game.show_fps_title));
+    CHECK(launcher_default(kShowFrameCounterKey) == flag(game.show_fps));
+    // 0 is "the loader's size", 1920 x 1080 (src/loader.c), the launcher's default.
+    CHECK(game.requested_width == 0 && launcher_default(kWindowWidthKey) == "1920");
+    CHECK(game.requested_height == 0 && launcher_default(kWindowHeightKey) == "1080");
+    CHECK(ReadAll(fs::path(DCP_SOURCE_DIR) / "src" / "loader.c").find(",1920,1080};") != std::string::npos);
+
+    // The launcher shows the default for values the game would not accept.
+    CHECK(!IsValidSetting(kDisplayModeKey, "fullscreen") && IsValidSetting(kDisplayModeKey, "borderless"));
+    CHECK(!IsValidSetting(kAnisotropyKey, "3") && IsValidSetting(kAnisotropyKey, "16"));
+    CHECK(!IsValidSetting(kRenderResolutionKey, "8K") && IsValidSetting(kRenderResolutionKey, "4K"));
 }
 
 bool WrittenValue(const std::string& text, const std::string& key, const std::string& value) {
@@ -639,14 +976,12 @@ void TestGraphicsQuality(const fs::path& base) {
     CHECK(WrittenValue(ReadAll(file), "smaa", "0"));
     CHECK(WrittenValue(ReadAll(file), "anisotropy", "0"));
 
-    const std::string graphics = ReadAll(source / "gpu" / "shim" / "gow3_graphics.h");
-    CHECK(graphics.find("Anisotropy = {0, 2, 4, 8, 16}") != std::string::npos);
-    const std::string loader = ReadAll(source / "gpu" / "shim" / "gow3_settings.cpp");
-    CHECK(loader.find("key == \"smaa\"") != std::string::npos);
-    CHECK(loader.find("ParseAnisotropy(i)") != std::string::npos);
-    const std::string header = ReadAll(source / "gpu" / "shim" / "gow3_settings.h");
-    CHECK(header.find("smaa{false}") != std::string::npos);
-    CHECK(header.find("anisotropy{0}") != std::string::npos);
+    for (const int level : {0, 2, 4, 8, 16}) {
+        CHECK(DcpGraphics::ParseAnisotropy(level) == level);
+    }
+    for (const int level : {1, 3, 32, -2}) {
+        CHECK(DcpGraphics::ParseAnisotropy(level) == 0);
+    }
     const std::string launcher = ReadAll(source / "launcher" / "launcher.cpp");
     const size_t resolution = launcher.find("\"Render resolution\"");
     const size_t anti_aliasing = launcher.find("\"Anti-aliasing\"");
@@ -660,13 +995,13 @@ void TestGraphicsCard(const fs::path& base) {
     const fs::path file = base / "gpu" / "dcp.ini";
     fs::remove_all(file.parent_path());
     const std::vector<std::string> names = {"NVIDIA GeForce RTX 4070", "", "Intel(R) UHD Graphics 730"};
-    CHECK(Gow3Graphics::FindGpuByName(names, "") == -1);
-    CHECK(Gow3Graphics::FindGpuByName(names, "automatic") == -1);
-    CHECK(Gow3Graphics::FindGpuByName(names, "NVIDIA GeForce RTX 4070") == 0);
-    CHECK(Gow3Graphics::FindGpuByName(names, "Intel(R) UHD Graphics 730") == 2);
-    CHECK(Gow3Graphics::FindGpuByName(names, "Intel(R) UHD Graphics 7") == -1); // exact names only
-    CHECK(Gow3Graphics::FindGpuByName(names, "AMD Radeon RX 7800 XT") == -1);   // removed card: Automatic
-    CHECK(Gow3Graphics::FindGpuByName({"", "Intel(R) UHD Graphics 730"}, "") == -1);
+    CHECK(DcpGraphics::FindGpuByName(names, "") == -1);
+    CHECK(DcpGraphics::FindGpuByName(names, "automatic") == -1);
+    CHECK(DcpGraphics::FindGpuByName(names, "NVIDIA GeForce RTX 4070") == 0);
+    CHECK(DcpGraphics::FindGpuByName(names, "Intel(R) UHD Graphics 730") == 2);
+    CHECK(DcpGraphics::FindGpuByName(names, "Intel(R) UHD Graphics 7") == -1); // exact names only
+    CHECK(DcpGraphics::FindGpuByName(names, "AMD Radeon RX 7800 XT") == -1);   // removed card: Automatic
+    CHECK(DcpGraphics::FindGpuByName({"", "Intel(R) UHD Graphics 730"}, "") == -1);
 
     bool managed = false;
     for (const ManagedSetting& setting : ManagedSettings()) {
@@ -692,7 +1027,7 @@ void TestGraphicsCard(const fs::path& base) {
     CHECK(instance.find("FindGpuByName(names, requested)") != std::string::npos);
     CHECK(instance.find("IsDeviceUsable(physical) ? ") != std::string::npos);
     CHECK(instance.find("const bool left_is_discrete") != std::string::npos); // the Automatic ranking is intact
-    CHECK(ReadAll(source / "gpu" / "shim" / "gow3_settings.cpp").find("key == \"graphics_card\"") != std::string::npos);
+    CHECK(instance.find("IsDeviceUsable(physical));") != std::string::npos); // usable devices rank first
     const std::string launcher = ReadAll(source / "launcher" / "launcher.cpp");
     const size_t monitor = launcher.find("ui.Row(\"Monitor\"");
     const size_t card = launcher.find("ui.Row(\"Graphics card\"");
@@ -822,6 +1157,26 @@ int main(int argc, char** argv) {
                     check.detail.c_str(), check.eboot_sha256.c_str());
         return check.state == GameFileState::kValid ? 0 : 1;
     }
+    // dcp-launcher-tests --install <.pkg or game folder> <app0> <image dir>: the launcher's installer without its
+    // window.
+    if (argc == 5 && std::string(argv[1]) == "--install") {
+        InstallHooks hooks;
+        hooks.phase = [](const char* phase) { std::printf("%s\n", phase); };
+        hooks.progress = [last = -1](uint64_t done, uint64_t total) mutable {
+            const int percent = total ? int(done * 100 / total) : 0;
+            if (percent / 10 != last / 10) {
+                std::printf("  %d%%\n", percent);
+            }
+            last = percent;
+            return true;
+        };
+        const InstallResult result =
+            InstallGame(PathFromUtf8(argv[2]), {PathFromUtf8(argv[3]), PathFromUtf8(argv[4])}, hooks);
+        std::printf("%s: %s%s%s (%zu files, %zu linked, %llu bytes)\n", DescribeInstall(result.status).title,
+                    DescribeInstall(result.status).text, result.detail.empty() ? "" : " - ", result.detail.c_str(),
+                    result.files, result.linked, static_cast<unsigned long long>(result.bytes));
+        return result.ok() ? 0 : 1;
+    }
 
     const fs::path base = fs::temp_directory_path() / ("dcp_launcher_tests_" + std::to_string(getpid()));
     fs::remove_all(base);
@@ -834,8 +1189,12 @@ int main(int argc, char** argv) {
     TestPaths();
     TestLogNumbering(base);
     TestDefaultLogFolders(base);
-    TestRuntimeDefaultsLiveInTheLoader();
+    TestEnvironmentVariables();
     TestCorrectnessStaysFixed();
+    TestPngDecoder();
+    TestInstaller(base);
+    TestVideoCoreSettings(base);
+    TestDefaultsAgree();
     TestRenderResolution(base);
     TestGraphicsQuality(base);
     TestGraphicsCard(base);

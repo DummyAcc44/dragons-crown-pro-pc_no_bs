@@ -1,7 +1,6 @@
-// gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// The game window (SDL3) the Vulkan swapchain presents to.
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <SDL3/SDL.h>
@@ -9,9 +8,9 @@
 #include "dcp_displays.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
-#include "gow3_overlay.h"
-#include "gow3_graphics.h"
-#include "gow3_settings.h"
+#include "dcp_overlay.h"
+#include "dcp_graphics.h"
+#include "dcp_settings.h"
 
 namespace Frontend {
 
@@ -21,7 +20,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
     // The launcher's Window size and Monitor settings; the same display list as its Monitor row.
-    const auto& settings = Gow3Settings::Get();
+    const auto& settings = DcpSettings::Get();
     const std::vector<dcp::Display> displays = dcp::ListDisplays();
     const dcp::Display* display = dcp::DisplayForSetting(displays, settings.monitor);
     int window_width = settings.requested_width > 0 ? settings.requested_width.load() : width_;
@@ -43,13 +42,6 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
-    // gow3: the game's own icon (run.py converts sce_sys/icon0.png to BMP, SDL's built-in format).
-    if (const char* icon_path = std::getenv("GOW3_WINDOW_ICON")) {
-        if (SDL_Surface* icon = SDL_LoadBMP(icon_path)) {
-            SDL_SetWindowIcon(window, icon);
-            SDL_DestroySurface(icon);
-        }
-    }
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
@@ -70,12 +62,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
-    // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
-    if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
-        Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
-        Gow3Settings::Get().display_mode = Gow3Graphics::Borderless;
-    }
-    ApplyDisplayMode(Gow3Settings::Get().display_mode);
+    ApplyDisplayMode(DcpSettings::Get().display_mode);
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
@@ -87,22 +74,17 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
                 window_width, window_height, settings.vsync ? "on" : "off", settings.show_fps_title ? "on" : "off");
 }
 
-// Windowed, borderless (desktop-sized, no mode change) or exclusive fullscreen at the desktop
-// mode. Window thread only (SDL). The swapchain follows the size events.
+// Borderless is a desktop-sized fullscreen window, without a display mode change. Window thread only (SDL); the
+// swapchain follows the size events.
 void WindowSDL::ApplyDisplayMode(int mode) {
     display_mode = mode;
-    if (mode == Gow3Graphics::Windowed) {
-        SDL_SetWindowFullscreen(window, false);
-    } else {
-        const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
-        const bool exclusive = mode == Gow3Graphics::Fullscreen && desktop;
-        if (!SDL_SetWindowFullscreenMode(window, exclusive ? desktop : nullptr)) {
-            LOG_WARNING(Frontend, "Fullscreen mode: {}", SDL_GetError());
-        }
-        SDL_SetWindowFullscreen(window, true);
+    const bool borderless = mode == DcpGraphics::Borderless;
+    if (borderless && !SDL_SetWindowFullscreenMode(window, nullptr)) {
+        LOG_WARNING(Frontend, "Borderless fullscreen: {}", SDL_GetError());
     }
+    SDL_SetWindowFullscreen(window, borderless);
     SDL_SyncWindow(window);
-    std::printf("Window: %s\n", Gow3Graphics::DisplayModeNames[mode]);
+    std::printf("Window: %s\n", DcpGraphics::DisplayModeNames[borderless ? DcpGraphics::Borderless : DcpGraphics::Windowed]);
 }
 
 WindowSDL::~WindowSDL() {
@@ -125,7 +107,7 @@ int WindowSDL::PollTextInput(std::string& out) {
 
 void WindowSDL::UpdateTextTitle() {
     RefreshTitle();
-    Gow3Overlay::SetTextEntry(text_active, text_prompt, text);
+    DcpOverlay::SetTextEntry(text_active, text_prompt, text);
 }
 
 // Window thread. The title is the game's, then the text being typed, or the frame rate.
@@ -146,7 +128,7 @@ void WindowSDL::RefreshTitle() {
 
 // The frame rate of the presented game frames, measured about once a second.
 void WindowSDL::UpdateFpsTitle() {
-    if (!Gow3Settings::Get().show_fps_title) {
+    if (!DcpSettings::Get().show_fps_title) {
         if (fps >= 0.0) {
             fps = -1.0;
             RefreshTitle();
@@ -156,14 +138,14 @@ void WindowSDL::UpdateFpsTitle() {
     const auto now = std::chrono::steady_clock::now();
     if (fps_started == std::chrono::steady_clock::time_point{}) {
         fps_started = now;
-        fps_frames = Gow3Overlay::PresentedFrames();
+        fps_frames = DcpOverlay::PresentedFrames();
         return;
     }
     const double elapsed = std::chrono::duration<double>(now - fps_started).count();
     if (elapsed < 1.0) {
         return;
     }
-    const u64 frames = Gow3Overlay::PresentedFrames();
+    const u64 frames = DcpOverlay::PresentedFrames();
     fps = double(frames - fps_frames) / elapsed;
     fps_started = now;
     fps_frames = frames;
@@ -172,9 +154,9 @@ void WindowSDL::UpdateFpsTitle() {
 
 // F11: Windowed and Borderless, saved as the Display mode like the launcher's row.
 void WindowSDL::ToggleBorderless() {
-    auto& mode = Gow3Settings::Get().display_mode;
-    mode = mode.load() == Gow3Graphics::Windowed ? Gow3Graphics::Borderless : Gow3Graphics::Windowed;
-    Gow3Settings::SaveDisplayMode();
+    auto& mode = DcpSettings::Get().display_mode;
+    mode = mode.load() == DcpGraphics::Windowed ? DcpGraphics::Borderless : DcpGraphics::Windowed;
+    DcpSettings::SaveDisplayMode();
 }
 
 bool WindowSDL::PollEvents() {
@@ -188,9 +170,9 @@ bool WindowSDL::PollEvents() {
         }
     }
     if (!text_active) {
-        Gow3Overlay::UpdateTextInput(window);
+        DcpOverlay::UpdateTextInput(window);
     }
-    if (const int mode = Gow3Settings::Get().display_mode; mode != display_mode) {
+    if (const int mode = DcpSettings::Get().display_mode; mode != display_mode) {
         ApplyDisplayMode(mode);
     }
     UpdateFpsTitle();
@@ -223,7 +205,7 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
-        if (Gow3Overlay::HandleEvent(event)) {
+        if (DcpOverlay::HandleEvent(event)) {
             continue;
         }
         switch (event.type) {

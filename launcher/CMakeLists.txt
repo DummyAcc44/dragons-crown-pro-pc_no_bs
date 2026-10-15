@@ -25,10 +25,13 @@ add_library(dcp_imgui_sdl STATIC ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp ${IMG
 target_include_directories(dcp_imgui_sdl PUBLIC ${IMGUI_DIR})
 target_link_libraries(dcp_imgui_sdl PUBLIC SDL3::SDL3)
 
-# Game file validation, the settings file and the Display options: no window needed (tests link only this).
-add_library(dcp_launcher_core STATIC game_files.cpp options.cpp paths.cpp resolution.c settings.cpp)
+# Game files (check, PKG unpacking, install, boot image), the settings file and the Display options: no window needed (tests link
+# only this).
+find_package(ZLIB REQUIRED)
+add_library(dcp_launcher_core STATIC boot_image.cpp game_files.cpp game_install.cpp options.cpp paths.cpp
+    pkg_extract.cpp resolution.c settings.cpp)
 target_include_directories(dcp_launcher_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(dcp_launcher_core PUBLIC trg_core SDL3::SDL3 PRIVATE bcrypt)
+target_link_libraries(dcp_launcher_core PUBLIC trg_core SDL3::SDL3 PRIVATE bcrypt ZLIB::ZLIB)
 
 add_library(dcp_launcher STATIC host.cpp launcher.cpp)
 target_compile_definitions(dcp_launcher PRIVATE DCP_PORT_VERSION="${DCP_PORT_VERSION}")
@@ -38,15 +41,17 @@ set_target_properties(dcp_launcher_core dcp_launcher PROPERTIES CXX_STANDARD 20 
 target_compile_options(dcp_launcher_core PRIVATE -Wall -Wextra)
 target_compile_options(dcp_launcher PRIVATE -Wall -Wextra)
 
-# DEBUG_SAULO: page screenshots from a hidden launcher window (tests/launcher_shots.cpp); not part of the default build.
+# Page screenshots from a hidden launcher window (tests/launcher_shots.cpp); not part of the default build.
 add_executable(dcp-launcher-shots EXCLUDE_FROM_ALL ../tests/launcher_shots.cpp)
 target_link_libraries(dcp-launcher-shots PRIVATE dcp_launcher)
 set_target_properties(dcp-launcher-shots PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
 # Focused tests with synthetic data and temporary folders (tools\test.ps1); not part of the default build.
-add_executable(dcp-launcher-tests EXCLUDE_FROM_ALL ../tests/launcher_tests.cpp ../src/runtime_log.c)
+find_package(PNG REQUIRED)
+add_executable(dcp-launcher-tests EXCLUDE_FROM_ALL ../tests/launcher_tests.cpp ../src/runtime_log.c
+    ../gpu/shim/dcp_settings.cpp ../gpu/shim/dcp_png.cpp)
 target_compile_definitions(dcp-launcher-tests PRIVATE DCP_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_link_libraries(dcp-launcher-tests PRIVATE dcp_launcher_core)
+target_link_libraries(dcp-launcher-tests PRIVATE dcp_launcher_core PNG::PNG)
 target_include_directories(dcp-launcher-tests PRIVATE ${PROJECT_SOURCE_DIR}/gpu/shim)
 set_target_properties(dcp-launcher-tests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_compile_options(dcp-launcher-tests PRIVATE -Wall -Wextra)

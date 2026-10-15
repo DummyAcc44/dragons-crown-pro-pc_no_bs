@@ -3,9 +3,9 @@
 
 #pragma once
 
-#include <deque>
-
+#include <atomic>
 #include <condition_variable>
+#include <deque>
 
 #include "core/libraries/videoout/buffer.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
@@ -100,7 +100,7 @@ public:
     Frame* PrepareBlankFrame(bool present_thread);
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
-    /// gow3: a black frame with the loading screen (Gow3Overlay::SetLoading) only.
+    /// A black frame with the loading screen (DcpOverlay::SetLoading) only.
     void PresentLoadingFrame();
     Frame* PrepareLastFrame();
 
@@ -112,9 +112,8 @@ private:
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
-    float expected_ratio{1920.0 / 1080.0f};
-    u32 expected_frame_width{1920};
-    u32 expected_frame_height{1080};
+    std::atomic<float> expected_ratio{1920.0f / 1080.0f};
+    std::atomic<u64> expected_frame_size{1920 | u64(1080) << 32}; ///< width | height << 32
 
     Frontend::WindowSDL& window;
     Instance instance;
@@ -125,7 +124,7 @@ private:
     HostPasses::PostProcessingPass pp_pass;
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
-    std::deque<u64> recent_frame_ticks; ///< gow3: GOW3_FRAMES_AHEAD bound (PrepareFrame)
+    u64 previous_frame_tick{}; ///< PrepareFrame's bound: one frame ahead of the GPU
     Scheduler present_scheduler;
     Scheduler flip_scheduler;
     Swapchain swapchain;
@@ -134,8 +133,8 @@ private:
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;
-    std::queue<Frame*> free_queue;
-    Frame* last_submit_frame;
+    std::deque<Frame*> free_queue;
+    Frame* last_submit_frame{};
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;

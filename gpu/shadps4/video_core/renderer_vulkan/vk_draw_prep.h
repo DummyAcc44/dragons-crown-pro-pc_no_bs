@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// gow3: speculative draw preparation on worker threads (docs/parallel_gpu.md, steps 1-2).
+// dcp: speculative draw preparation on worker threads (off in Dragon's Crown Pro: vk_draw_prep.cpp).
 //
 // Every submitted graphics command buffer is copied. A scanner thread replays the register
 // writes of the whole stream in order (ApplyGraphicsRegisterPacket, the same code the GPU
@@ -38,7 +38,7 @@ struct PreparedStage {
     const u32* flat; ///< flattened user data the worker computed, owned by the submission
     u32 flat_size;
     // Resource sharps read from `flat` in the order of the program's resource lists, and the
-    // texture description hash of each image (docs/parallel_gpu.md, step 2). Valid for the
+    // texture description hash of each image. Valid for the
     // GPU thread exactly when `flat` matched: sharps depend on nothing else.
     const AmdGpu::Image* image_sharps;
     const u64* image_hashes;
@@ -113,7 +113,7 @@ public:
     /// GPU thread: the prepared state for the next direct draw of the current submission.
     const PreparedDraw* NextDraw();
 
-    /// GPU thread: counts whether a prepared draw was used; prints every 5 s (GOW3_FRAME_STATS).
+    /// GPU thread: counts whether a prepared draw was used; prints every 5 s (DCP_FRAME_STATS).
     void Count(bool used);
 
     struct Submission {
@@ -143,7 +143,7 @@ private:
     std::unique_ptr<AmdGpu::Regs> tail_regs;
     u64 tail_seq{};
     u64 tail_checksum{};
-    u64 rebases = 0; ///< scanner restarts from the GPU thread state (GOW3_FRAME_STATS)
+    u64 rebases = 0; ///< scanner restarts from the GPU thread state (DCP_FRAME_STATS)
     bool baseline_ready{}; ///< guarded by `mutex`
     std::mutex mutex;
     std::condition_variable_any cv;
@@ -152,7 +152,7 @@ private:
     std::shared_ptr<Submission> current;
 
 public:
-    /// gow3: the current submission (prepared draws), for the draw recording thread to keep
+    /// dcp: the current submission (prepared draws), for the draw recording thread to keep
     /// it alive while it still records its draws.
     [[nodiscard]] std::shared_ptr<const void> KeepCurrent() const {
         return current;

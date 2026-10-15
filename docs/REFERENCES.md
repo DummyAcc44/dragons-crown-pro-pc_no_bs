@@ -1,11 +1,11 @@
 # Reference projects
 
-Local clones in `S:\VisualStudio\repos\referencias-ps4`, inspected before choosing a base. Everything below was
-read from those trees (code, scripts, `git log`, diffs), not assumed. Folder to project:
+Local clones of the projects below were inspected before choosing a base. Everything here was read from those trees
+(code, scripts, `git log`, diffs), not assumed. Folder to project:
 
 | Folder | Project | HEAD (commits) |
 |---|---|---|
-| `uncharted-ndc-native` | Saulo's Uncharted: NDC port | 2026-10-14 (2) |
+| `uncharted-ndc-native` | Uncharted: NDC port by this project's author | 2026-10-14 (2) |
 | `medievil_pc` | bc160201983/medievil_pc | 2026-10-13 (231) |
 | `gow3_pc` | FelipePrado0/gow3_pc | 2026-10-13 (366) |
 | `tlg_pc`, `gr2_pc`, `iss_pc` | HayatoG ports (code under `port/`) | 2026-10-13 (70 / 83 / 121) |
@@ -60,8 +60,7 @@ sources (`gpu/deps.txt`), about twenty MSYS2 packages. Vendored in phase 2 once 
 
 Not taken: Uncharted specifics (CUSA02320, `big2`/`big3`, LoadExec switching, `u*data`, offsets, hashes, `NDC_`), GoW
 cheats/patches/signatures/launcher/upscalers, MediEvil's UE4 override, HayatoG hooks and per-game runtimes.
-Internal vendored shadPS4/gow3 names (`Gow3Settings`, `GOW3_*`) will stay inside the future `gpu/` tree; the profile
-sets the generic defaults.
+The inherited `gow3_*` shim files and `GOW3_*` switches were later renamed to `dcp_*` or removed (gpu/VENDOR.txt).
 
 ## Import profile comparison
 

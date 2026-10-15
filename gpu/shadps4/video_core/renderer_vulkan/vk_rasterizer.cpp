@@ -3,8 +3,7 @@
 
 #include <chrono>
 #include <xxhash.h>
-#include "video_core/renderer_vulkan/ui_composition.h"
-#include "gow3_toggles.h"
+#include "dcp_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -21,8 +20,8 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
-#include "gow3_settings.h"
-#include "gow3_threads.h"
+#include "dcp_settings.h"
+#include "dcp_threads.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -54,12 +53,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
-    // Object motion first: it fixes the buffer addresses the motion shader variants embed.
-    object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
-    camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
-    camera_motion->SetObjectMotion(object_motion.get());
-    upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
-                                                  *camera_motion, *scene_targets);
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -70,7 +63,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
     }
-    // gow3: this thread joins the texture binding helper before it changes image state.
+    // dcp: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         runtime.FlushBarriers();
@@ -78,29 +71,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     });
 }
 
-// [DEBUG_SAULO][PreparedDraw]: 5 lines in the first 5 s, then 50 more.
-static const auto dbg_start = std::chrono::steady_clock::now();
-static std::atomic<u32> dbg_mismatches{}, dbg_early{}, dbg_late{};
-
-static void LogPreparedMismatch(u64 tick, u32 slot, u64 old_base, u64 new_base) {
-    const u64 count = dbg_mismatches.fetch_add(1) + 1;
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - dbg_start).count();
-    if ((ms < 5000 ? dbg_early : dbg_late).fetch_add(1) < (ms < 5000 ? 5u : 50u)) {
-        LOG_WARNING(Render_Vulkan,
-                    "[DEBUG_SAULO][PreparedDraw] time_ms={} frame={} draw={} vb={} old_base={:#x} new_base={:#x} "
-                    "descriptor_changed=1 total={}",
-                    ms, Gow3Stats::gpu_frames.load(std::memory_order_relaxed), tick, slot, old_base,
-                    new_base, count);
-    }
-}
-
-Rasterizer::~Rasterizer() {
-    if (dbg_mismatches) {
-        LOG_WARNING(Render_Vulkan, "[DEBUG_SAULO][PreparedDraw] total_descriptor_mismatches={} logged={}",
-                    dbg_mismatches.load(), std::min(dbg_early.load(), 5u) + std::min(dbg_late.load(), 50u));
-    }
-}
+Rasterizer::~Rasterizer() = default;
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
@@ -200,7 +171,7 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
     };
     (append(parts), ...);
     const u64 generation = texture_cache.RegistryGeneration();
-    const bool memo_enabled = !Gow3Toggle::Disabled(Gow3Toggle::TextureBindingMemo);
+    const bool memo_enabled = !DcpToggle::Disabled(DcpToggle::TextureBindingMemo);
     if (memo_enabled && last.generation == generation && last.key_size == key_size &&
         std::memcmp(last.key.data(), key.data(), key_size) == 0) {
         texture_cache.MarkFound(last.image_id);
@@ -286,37 +257,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     } else {
         db_desc.first = {};
     }
-    // gow3: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
-    // main camera (shadow passes bind the same layout with the light's camera).
-    gbuffer_draw = camera_motion->Enabled() && std::popcount(key.mrt_mask) >= 5 && db_desc.first;
-    if (gbuffer_draw) {
-        camera_motion->OnGBufferPass(db_desc.first);
-    }
-    if (upscaler->Enabled() && cb_descs[0].first) {
-        upscaler->OnColorTarget(cb_descs[0].first);
-    }
-    // gow3: scene color: a full-size RGBA16F target drawn with the scene depth.
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
-        cb_descs[0].first && std::popcount(key.mrt_mask) <= 2) {
-        const auto& color = texture_cache.GetImage(cb_descs[0].first);
-        const auto& depth = texture_cache.GetImage(db_desc.first);
-        if (color.info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
-            color.info.size.width == depth.info.size.width &&
-            color.info.size.height == depth.info.size.height) {
-            upscaler->OnSceneColor(cb_descs[0].first);
-            // Blended geometry without depth writes (not full-screen passes): transparents and
-            // effects start. Blended layers writing depth (decals, wet/blood ground) are
-            // surfaces and stay in the history.
-            if (regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass &&
-                !regs.depth_control.depth_write_enable &&
-                (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
-                upscaler->OnBlendedSceneDraw();
-            } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
-                // A full-screen pass over the scene (the fog composite): the transparents are in.
-                upscaler->OnSceneComposite();
-            }
-        }
-    }
 }
 
 static std::pair<u32, u32> GetDrawOffsets(
@@ -358,7 +298,7 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// gow3: two-stage draw pipeline (vk_draw_pipe.h). Packet layout, 8-byte aligned parts:
+// dcp: two-stage draw pipeline (vk_draw_pipe.h). Packet layout, 8-byte aligned parts:
 // DrawPacket, u16 block indices, u32 block words (RegDirty::BlockWords each), then per stage a
 // PacketStage with its user data and flattened user data, then (verification) the full file.
 namespace {
@@ -394,31 +334,22 @@ constexpr u32 AlignPacket(u32 size) {
     return (size + 7) & ~7u;
 }
 u32 VerifyInterval() {
-    static const u32 interval = [] {
-        const char* env = std::getenv("GOW3_PIPE_VERIFY");
-        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
-    }();
-    return interval;
+    return 0;
 }
 } // namespace
 
 bool Rasterizer::DrawPipeWanted() {
-    const char* env = std::getenv("GOW3_DRAW_PIPE");
-    if (env && env[0]) {
-        return env[0] == '1';
-    }
-    // Stage B spins while draws flow. Measured ahead with 16 threads (+19%) and with 4 cores /
-    // 8 threads (taskset, Steam Deck-like: +18%).
-    return Gow3Threads::Available() >= 8;
+    // Stage B spins while draws flow: it pays off from 8 hardware threads.
+    return DcpThreads::Available() >= 8;
 }
 
 bool Rasterizer::UseDrawPipe() const {
-    return draw_pipe && !host_markers_enabled && !Gow3Toggle::Disabled(Gow3Toggle::DrawPipeline);
+    return draw_pipe && !host_markers_enabled && !DcpToggle::Disabled(DcpToggle::DrawPipeline);
 }
 
 bool Rasterizer::OnStageA() const {
 #ifdef _WIN32
-    // gow3 (Windows): libc++ compares std::thread::id through winpthreads' pthread_equal,
+    // dcp (Windows): libc++ compares std::thread::id through winpthreads' pthread_equal,
     // which asks the kernel (GetThreadId) for both threads: two system calls per check, many
     // per draw. The numeric thread id comes from the TEB.
     return static_cast<u32>(gettid()) == liverpool->GetGpuCommandProcessorThreadId();
@@ -428,7 +359,7 @@ bool Rasterizer::OnStageA() const {
 }
 
 namespace {
-/// Stage A: cycles waited per drain site (GOW3_FRAME_STATS), keyed by function name and line.
+/// Stage A: cycles waited per drain site (DCP_FRAME_STATS), keyed by function name and line.
 std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
 } // namespace
 
@@ -436,7 +367,7 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (!draw_pipe || !OnStageA()) {
         return;
     }
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = DcpStats::enabled;
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -512,7 +443,7 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                            boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
     const PreparedStage* prepared_stage = nullptr;
-    if (prepared && !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)) {
+    if (prepared && !DcpToggle::Disabled(DcpToggle::PreparedResources)) {
         for (u32 i = 0; i < prepared->num_stages; ++i) {
             const auto& candidate = prepared->stages[i];
             if (&candidate.program->info == &stage &&
@@ -608,7 +539,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         if (stage) {
             auto& ring = rings[num_stages];
             ring.clear();
-            if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
+            if (constant_ring && !DcpToggle::Disabled(DcpToggle::ConstantRing)) {
                 CollectRingBindings(*stage, used_prepared, ring);
             }
             ++num_stages;
@@ -709,7 +640,7 @@ void Rasterizer::RetireSubmission() {
 }
 
 bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle) {
-    if (!UseDrawPipe() || Gow3Toggle::Disabled(toggle)) {
+    if (!UseDrawPipe() || DcpToggle::Disabled(toggle)) {
         DrainDrawPipe(DrawPipe::ReasonRasterizer);
         task(*this, static_cast<const u8*>(data));
         return false;
@@ -856,7 +787,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
 }
 
 void Rasterizer::PrintPipeStats() {
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = DcpStats::enabled;
     if (!stats || (draw_pipe->packets & 1023) != 0) {
         return;
     }
@@ -936,13 +867,13 @@ bool Rasterizer::FilterDrawPasses() const {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
-    Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
+    DcpStats::draws.fetch_add(1, std::memory_order_relaxed);
 
-    // gow3: with the draw pipeline this thread only selects the pipeline and hands the draw
+    // dcp: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
     const bool pipelined = UseDrawPipe();
     if (pipelined && !FilterDrawPasses() &&
-        !Gow3Toggle::Disabled(Gow3Toggle::PipelinedMemoryWrites)) {
+        !DcpToggle::Disabled(DcpToggle::PipelinedMemoryWrites)) {
         PostDraw(nullptr, nullptr, false, 0);
         return;
     }
@@ -978,36 +909,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scheduler.PopPendingOperations();
     }
     const auto& regs = Regs();
-    // gow3: the pass copying a finished frame to a display buffer; the previous draw's
-    // target is that frame.
-    if (camera_motion->Enabled() && regs.color_buffers[0] &&
+    // The pass copying a finished frame to a display buffer starts the profiler's next frame.
+    if (auto* profiler = GpuProfiler::Get(); profiler && regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
-        scene_started = false;
-        camera_motion->OnDisplayPass(cb_descs[0].first);
-        if (upscaler->OnFrameStart()) {
-            object_motion->InvalidateHistory();
-            camera_motion->InvalidateHistory();
-        }
-        camera_motion->SetJitter(upscaler->Jitter());
-        object_motion->OnFrameStart();
-        NoteFrameStart();
-        static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
-        scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
-        scene_targets->debug = scene_debug_frame;
+        profiler->BeginFrame();
     }
     bind_prepared = used_prepared;
-    motion_draw = pipeline->GetGraphicsKey().motion_vectors;
-    motion_geometry = 0;
 
     PrepareRenderState(pipeline);
-    if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
-        const auto& viewport = Regs().viewports[0];
-        upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
-                         cb_descs[0].first, db_desc.first,
-                         UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2));
-    }
     const PreparedDraw* draw_prepared = bind_prepared;
-    // gow3: vertex and index buffers are resolved while the helper binds textures (their
+    // dcp: vertex and index buffers are resolved while the helper binds textures (their
     // commands are recorded after BeginRendering, as before).
     draw_inputs = {pipeline, draw_prepared, index_offset, is_indexed, true, false};
     const bool bound = BindResources(pipeline);
@@ -1034,101 +945,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         runtime.FlushBarriers();
     }
 
-    // gow3: screen-space (clip disabled) draws into the upscaler's output-size images.
+    // dcp: screen-space (clip disabled) draws into scaled scene targets.
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
-    if (motion_draw && motion_geometry) {
-        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
-        const auto [base_vertex, first_instance] =
-            GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
-        const u32 index_size =
-            regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16 ? 2u : 4u;
-        const VAddr index_address = is_indexed
-            ? regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size : 0;
-        // Without a character-size skeleton the draw is gated on its bone palette changing
-        // since last frame (model constants follow the camera, the palette does not). The
-        // check comes first: most gated draws are static world pieces with long index lists.
-        static const bool all_motion = [] {
-            const char* value = std::getenv("GOW3_OBJECT_MOTION_ALL");
-            return value && value[0] == '1';
-        }();
-        bool gated = !all_motion;
-        u64 palette = 0;
-        for (const auto& resource : vs.buffers) {
-            if (resource.IsSpecial()) continue;
-            const auto buffer = resource.GetSharp(vs);
-            const u32 size = buffer.GetSize();
-            if (!buffer.Valid() || buffer.GetStride() != 16) continue;
-            const auto role = Motion::ClassifyBuffer(size);
-            if (role == Motion::BufferRole::Skeleton) {
-                gated = false;
-                break;
-            }
-            const VAddr address = buffer.base_address;
-            if (role == Motion::BufferRole::SmallSkeleton &&
-                memory->IsValidGpuMapping(address, 0) &&
-                memory->ClampRangeSize(address, size) == size) {
-                palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(address), size,
-                                               palette);
-            }
-        }
-        push_data.motion_param = 0;
-        if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
-                                             .geometry = motion_geometry,
-                                             .indices = index_address,
-                                             .index_count = regs.num_indices,
-                                             .instances = regs.num_instances.NumInstances(),
-                                             .first_instance = first_instance},
-                                            palette)) {
-            Motion::VertexRange range{base_vertex, regs.num_indices};
-            u64 topology = 0;
-            if (is_indexed) {
-                range = {};
-                const u64 bytes = u64(regs.num_indices) * index_size;
-                if (index_address && memory->IsValidGpuMapping(index_address, 0) &&
-                    memory->ClampRangeSize(index_address, bytes) == bytes) {
-                    const bool restart = regs.enable_primitive_restart != 0;
-                    const u32 count = regs.num_indices;
-                    const auto scanned = object_motion->IndexRange(
-                        {index_address, count, index_size, s32(base_vertex), restart}, [&] {
-                            const auto* data = reinterpret_cast<const void*>(index_address);
-                            const auto scan_range =
-                                index_size == 2
-                                    ? Motion::IndexedRange(
-                                          std::span(static_cast<const u16*>(data), count),
-                                          s32(base_vertex), restart)
-                                    : Motion::IndexedRange(
-                                          std::span(static_cast<const u32*>(data), count),
-                                          s32(base_vertex), restart);
-                            return Motion::IndexRangeCache::Result{scan_range,
-                                                                   XXH3_64bits(data, bytes)};
-                        });
-                    range = scanned.range;
-                    topology = scanned.topology;
-                }
-            }
-            push_data.motion_param = object_motion->PrepareDraw({
-                .shader = vs.pgm_hash,
-                .geometry = motion_geometry,
-                .indices = index_address,
-                .topology = topology,
-                .index_count = regs.num_indices,
-                .instances = regs.num_instances.NumInstances(),
-                .first_instance = first_instance,
-                .vertices = range,
-            });
-        }
-    }
     pipeline->BindResources(set_writes, push_data);
-    // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
-    // full-screen quad leaves an edge column unwritten).
-    draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
-        draw_jitter = upscaler->Jitter();
-    }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
@@ -1182,10 +1004,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
-    // gow3: like direct draws, handed to the recording thread after the pipeline selection
+    // dcp: like direct draws, handed to the recording thread after the pipeline selection
     // (else the GPU thread waited here for a whole frame of queued draws).
     const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
-                           !Gow3Toggle::Disabled(Gow3Toggle::PipelinedIndirectDraws);
+                           !DcpToggle::Disabled(DcpToggle::PipelinedIndirectDraws);
     if (!pipelined) {
         DrainDrawPipe();
         scheduler.PopPendingOperations();
@@ -1220,16 +1042,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     const u32 stride = indirect.stride;
     const u32 max_count = indirect.max_count;
 
-    // Indirect arguments may be GPU-written: leave these draws on camera fallback.
-    motion_draw = false;
-    motion_geometry = 0;
     PrepareRenderState(pipeline);
-    if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
-        const auto& viewport = Regs().viewports[0];
-        upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
-                         cb_descs[0].first, db_desc.first,
-                         UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2));
-    }
     if (!BindResources(pipeline)) {
         return;
     }
@@ -1255,16 +1068,12 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         runtime.FlushBarriers();
     }
 
-    // gow3: screen-space (clip disabled) draws into the upscaler's output-size images.
+    // dcp: screen-space (clip disabled) draws into scaled scene targets.
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
     pipeline->BindResources(set_writes, push_data);
-    draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth()) {
-        draw_jitter = upscaler->Jitter();
-    }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
@@ -1305,9 +1114,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
-    Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
-    // gow3: like draws, handed to the draw recording thread after the pipeline selection.
-    const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedDispatch);
+    DcpStats::dispatches.fetch_add(1, std::memory_order_relaxed);
+    // dcp: like draws, handed to the draw recording thread after the pipeline selection.
+    const bool pipelined = UseDrawPipe() && !DcpToggle::Disabled(DcpToggle::PipelinedDispatch);
     if (!pipelined) {
         DrainDrawPipe();
     }
@@ -1324,8 +1133,6 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     FrameCapture::Poll();
-    gbuffer_draw = false;
-
     scheduler.PopPendingOperations();
 
     const auto& cs_program = CsRegs();
@@ -1340,9 +1147,6 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             });
         }
     };
-    if (upscaler->Enabled()) {
-        upscaler->OnDispatch(cs.pgm_hash);
-    }
     if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
         return;
     }
@@ -1376,8 +1180,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
-    // gow3: handed to the recording thread like direct dispatches.
-    const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedIndirectDraws);
+    // dcp: handed to the recording thread like direct dispatches.
+    const bool pipelined = UseDrawPipe() && !DcpToggle::Disabled(DcpToggle::PipelinedIndirectDraws);
     if (!pipelined) {
         DrainDrawPipe();
     }
@@ -1451,7 +1255,7 @@ void Rasterizer::OnSubmit() {
 
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {
     // Sharps a draw-preparation worker read from the same flattened user data.
-    if (!bind_prepared || Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)) {
+    if (!bind_prepared || DcpToggle::Disabled(DcpToggle::PreparedResources)) {
         return nullptr;
     }
     for (u32 i = 0; i < bind_prepared->num_stages; ++i) {
@@ -1467,20 +1271,15 @@ const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) co
 }
 
 bool Rasterizer::BindHelperWanted() {
-    // A spinning helper pays off only with cores to spare (the recording thread spins too).
-    const char* env = std::getenv("GOW3_TEXTURE_HELPER");
-    if (env && env[0]) {
-        return env[0] == '1';
-    }
-    // Measured neutral on 16 threads (docs/parallel_gpu.md): opt-in.
+    // A spinning helper thread measured neutral even with cores to spare.
     return false;
 }
 
 bool Rasterizer::HelperEligible(const Pipeline* pipeline) const {
     if (pipeline->IsCompute() || !bind_helper.Available() || FrameCapture::Active() ||
-        Gow3Toggle::Disabled(Gow3Toggle::TextureBindHelper) ||
-        Gow3Toggle::Disabled(Gow3Toggle::TextureBindingMemo) ||
-        Gow3Toggle::Disabled(Gow3Toggle::UpdateImageFastPath)) {
+        DcpToggle::Disabled(DcpToggle::TextureBindHelper) ||
+        DcpToggle::Disabled(DcpToggle::TextureBindingMemo) ||
+        DcpToggle::Disabled(DcpToggle::UpdateImageFastPath)) {
         return false;
     }
     for (const auto* stage : pipeline->GetStages()) {
@@ -1533,8 +1332,7 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
             image = &texture_cache.GetImage(image_id);
         }
         if (image->binding.needs_rebind || !texture_cache.IsUpToDate(image_id) ||
-            scene_targets->Tracks(image->image_uid) ||
-            (upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
+            scene_targets->Tracks(image->image_uid)) {
             return false;
         }
     }
@@ -1573,24 +1371,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_writes.clear();
     buffer_infos.clear();
     image_infos.clear();
-    // gow3: G-buffer passes sample material textures for a scene rendered below the output
-    // size; the temporal upscaler restores the detail of the output's mip level (FSR guide:
-    // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
-    sampler_lod_bias = 0.0f;
-    if (!pipeline->IsCompute() && !Gow3Toggle::Disabled(Gow3Toggle::SceneMipBias) &&
-        std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
-                      0xff) >= 5) {
-        sampler_lod_bias = upscaler->SceneMipBias();
-        static float reported = 0.0f;
-        if (sampler_lod_bias != reported) {
-            reported = sampler_lod_bias;
-            std::printf("Upscaler: scene texture LOD bias %.2f\n", sampler_lod_bias);
-        }
-    }
 
     bool uses_dma = false;
 
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = DcpStats::enabled;
     if (stats && ((helper_full + helper_partial + helper_serial) & 1023) == 0) {
         static auto window = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
@@ -1627,7 +1411,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             uses_dma |= stage->uses_dma;
         }
     } else {
-        // gow3: textures on the helper, buffers here. Without mip arrays every stage's
+        // dcp: textures on the helper, buffers here. Without mip arrays every stage's
         // descriptors are [buffers][images][samplers], one each, so both sides know their
         // binding numbers and descriptor write slots up front.
         struct BufferStage {
@@ -1668,7 +1452,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             auto& stage = buffer_stages[i];
             BindBuffers(*stage.info, stage.prepared, stage.binding, push_data, stage.write_index);
         }
-        if (draw_inputs.pending && !Gow3Toggle::Disabled(Gow3Toggle::EarlyDrawInputs)) {
+        if (draw_inputs.pending && !DcpToggle::Disabled(DcpToggle::EarlyDrawInputs)) {
             ResolveVertexBuffers(draw_inputs.pipeline, draw_inputs.prepared);
             if (draw_inputs.is_indexed) {
                 ResolveIndexBuffer(draw_inputs.index_offset);
@@ -1701,7 +1485,7 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline, const Prepa
 }
 
 void Rasterizer::EmitVertexBuffers() {
-    // gow3: only the used entries go into the recording chunk (the static vectors hold 32 of
+    // dcp: only the used entries go into the recording chunk (the static vectors hold 32 of
     // each: ~3 KiB copied per draw).
     auto& v = vertex_binds;
     const bool dynamic_input = instance.IsVertexInputDynamicState();
@@ -1756,7 +1540,7 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     const PreparedVertexInputs* ready =
         prepared && prepared->vertex.valid && instance.IsVertexInputDynamicState() && fetch &&
                 fetch->attributes.size() == prepared->vertex.count && !FrameCapture::Active() &&
-                !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)
+                !DcpToggle::Disabled(DcpToggle::PreparedResources)
             ? &prepared->vertex
             : nullptr;
     if (ready) {
@@ -1766,7 +1550,6 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         for (u32 i = 0; i < ready->count; ++i) {
             const auto current = fetch->attributes[i].GetSharp(vs_info);
             if (std::memcmp(&current, &ready->buffers[i], sizeof(current)) != 0) {
-                LogPreparedMismatch(scheduler.CurrentTick(), i, ready->buffers[i].base_address, current.base_address);
                 ready = nullptr;
                 break;
             }
@@ -1784,23 +1567,6 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     if (bindings.empty()) {
         // If there are no bindings, there is nothing further to do.
         return;
-    }
-    if (motion_draw && !guest_buffers.empty()) {
-        // Include every stream: identical position buffers can be paired with different
-        // skinning/instance data. Index topology and base offsets are matched separately.
-        motion_geometry = ready ? ready->buffers_hash
-                                : XXH3_64bits(guest_buffers.data(),
-                                              guest_buffers.size() * sizeof(AmdGpu::Buffer));
-    }
-    // Object motion research: vertex streams of G-buffer draws.
-    if (FrameCapture::Active() && gbuffer_draw) {
-        for (const auto& vb : guest_buffers) {
-            char note[128];
-            std::snprintf(note, sizeof(note), "\n  gb vb at %#llx size %u stride %u",
-                          (unsigned long long)vb.base_address, u32(vb.GetSize()),
-                          u32(vb.GetStride()));
-            FrameCapture::Note(note);
-        }
     }
 
     struct BufferRange {
@@ -2091,10 +1857,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(ring->address), ring->size);
             }
             if (!desc.IsSpecial()) {
-                if (ring->size == 864 && gbuffer_draw &&
-                    memory->IsValidGpuMapping(ring->address, 0)) {
-                    camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
-                }
                 push_data.AddOffset(binding.buffer, 0);
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
@@ -2152,22 +1914,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         } else {
             const auto vsharp =
                 prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
-            if (vsharp.GetSize() == 864 && gbuffer_draw &&
-                memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));
-            }
-            // Object motion research: the vertex shader buffers of G-buffer draws.
-            if (FrameCapture::Active() && gbuffer_draw && stage.sw_stage == Shader::SwStage::Vertex &&
-                vsharp.base_address != 0 && memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                const auto* f = reinterpret_cast<const float*>(vsharp.base_address);
-                char note[192];
-                std::snprintf(note, sizeof(note),
-                              "\n  gb vs %08x slot %u at %#llx size %u stride %u: %g %g %g %g",
-                              u32(stage.pgm_hash), binding.buffer,
-                              (unsigned long long)vsharp.base_address, u32(vsharp.GetSize()),
-                              u32(vsharp.GetStride()), f[0], f[1], f[2], f[3]);
-                FrameCapture::Note(note);
-            }
             if (FrameCapture::Active() && vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
                 FrameCapture::Buffer(stage.pgm_hash, binding.buffer, vsharp.base_address,
@@ -2223,7 +1969,7 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
     const auto matches = [&](const ImageDescCacheEntry& e) {
         return e.flags == flags && e.sharp == key;
     };
-    const bool disabled = Gow3Toggle::Disabled(Gow3Toggle::ImageDescCache);
+    const bool disabled = DcpToggle::Disabled(DcpToggle::ImageDescCache);
     ImageDescCacheEntry* slot = nullptr;
     if (!disabled && matches(set[0])) {
         slot = &set[0];
@@ -2242,7 +1988,7 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
     slot->last_use = ++desc_use_counter;
     auto& entry = *slot;
     if (entry.flags != flags || entry.sharp != key ||
-        Gow3Toggle::Disabled(Gow3Toggle::ImageDescCache)) {
+        DcpToggle::Disabled(DcpToggle::ImageDescCache)) {
         entry.desc = VideoCore::TextureCache::ImageDesc{sharp, res};
         entry.sharp = key;
         entry.flags = flags;
@@ -2284,15 +2030,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     // SampleSceneProxies: bindings that may read a reduced scene proxy instead of the native
     // image (normalized sampling only; see Shader::ImageResource::needs_native).
     boost::container::small_vector<bool, 16> binding_proxy_ok;
-    const bool sample_proxies = !Gow3Toggle::Disabled(Gow3Toggle::SampleSceneProxies) &&
+    const bool sample_proxies = !DcpToggle::Disabled(DcpToggle::SampleSceneProxies) &&
                                 !on_helper && scene_targets->Reduced();
 
     for (u32 image_index = 0; image_index < stage.images.size(); ++image_index) {
         const auto& image_desc = stage.images[image_index];
         const auto tsharp =
             prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
-        // gow3: a hash lookup per texture per draw for a diagnostic only.
-        static const bool warn_meta = std::getenv("GOW3_WARN_META_TEXTURE") != nullptr;
+        // A hash lookup per texture per draw, for a diagnostic only.
+        static const bool warn_meta = EmulatorSettingsImpl::Flag("DCP_WARN_META_TEXTURE");
         if (warn_meta && texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
         }
@@ -2334,23 +2080,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         auto& desc_entry =
             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
                      : CachedImageDescEntry(tsharp, image_desc);
-        // GOW3_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
-        const auto debug_native = [&](const VideoCore::Image& image) {
-            if (!scene_debug_frame || proxy_candidate || !image.scene_proxy) return;
-            std::printf("Scene native read: %s %016llx %s %ux%u needs_native %d written %d "
-                        "bindings %u mip_fallback %d\n",
-                        stage.sw_stage == Shader::SwStage::Compute ? "cs" : "gfx",
-                        (unsigned long long)stage.pgm_hash,
-                        vk::to_string(image.info.pixel_format).c_str(), image.info.size.width,
-                        image.info.size.height, int(image_desc.needs_native),
-                        int(image_desc.is_written), num_bindings, int(mip_fallback_mode));
-        };
         for (auto i = 0; i < num_bindings; i++) {
-            // gow3: a plain binding (no mip override) of the same T# resolves to the same image
+            // dcp: a plain binding (no mip override) of the same T# resolves to the same image
             // while no image was registered or unregistered.
             if (mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
                 desc_entry.found_generation == texture_cache.RegistryGeneration() &&
-                !Gow3Toggle::Disabled(Gow3Toggle::TextureBindingMemo)) {
+                !DcpToggle::Disabled(DcpToggle::TextureBindingMemo)) {
                 desc_entry.pinned = bind_epoch;
                 auto& [image_id, _] =
                     image_bindings.emplace_back(desc_entry.found_id, &desc_entry.found_desc);
@@ -2362,7 +2097,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                     image_id = depth_image_id;
                     image = &texture_cache.GetImage(image_id);
                 }
-                debug_native(*image);
                 if (image->binding.is_bound) {
                     image->binding.force_general |= image_desc.is_written;
                 }
@@ -2400,7 +2134,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 image_id = depth_image_id;
                 image = &texture_cache.GetImage(image_id);
             }
-            debug_native(*image);
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
                 // need to force general layout on it.
@@ -2438,11 +2171,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
 
-            // gow3: a proxied scene image sampled with normalized coordinates reads the proxy:
+            // dcp: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
             if (binding_proxy_ok[binding_index] && !is_storage && !binding.force_general &&
-                !binding.is_target &&
-                !(upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
+                !binding.is_target) {
                 if (const auto proxy = scene_targets->SampleProxy(image, desc.view_info)) {
                     image.usage.texture = 1u;
                     image_infos.emplace_back(VK_NULL_HANDLE, proxy->view, proxy->layout);
@@ -2488,13 +2220,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 FrameCapture::Sampled(image.info, is_storage);
             }
 
-            vk::ImageView view = *image_view.image_view;
-            vk::ImageLayout layout = image.backing->state.layout;
-            if (upscaler->Enabled()) {
-                // gow3: the display pass reads the upscaled frame (scaled presets).
-                upscaler->RedirectSampled(image_id, image_view.info, view, layout);
-            }
-            image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
+            image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
+                                     image.backing->state.layout);
             if (set_ok && binding_index < resolved.size()) {
                 resolved[binding_index] = {image_id, *image_view.image_view, image.backing,
                                            desc.view_info.range};
@@ -2535,7 +2262,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 }
 
 void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
-    const int forced = Gow3Settings::Get().anisotropy;
+    const int forced = DcpSettings::Get().anisotropy;
     if (forced <= 1 || is_depth || pipeline_is_compute || sharp.mip_filter == AmdGpu::MipFilter::None ||
         (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
          sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear)) {
@@ -2562,7 +2289,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
         ForceAnisotropy(ssharp, sampler.is_depth);
         const auto vk_sampler = texture_cache.GetSampler(
-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+            ssharp, Regs().ta_bc_base, sampler.is_depth, 0.0f);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
@@ -2594,8 +2321,7 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
     sig.num_samples = key.num_samples;
     sig.motion = key.motion_vectors;
     sig.scene_started = scene_started;
-    sig.raster_scaling = upscaler->RasterScaling();
-    sig.upscaler_state = upscaler->RedirectState();
+    sig.raster_scaling = scene_targets->Reduced();
     sig.generation = texture_cache.RegistryGeneration();
     std::memcpy(&sig.depth_control, &regs.depth_control, sizeof(u32));
     sig.depth_valid = regs.depth_buffer.DepthValid();
@@ -2607,7 +2333,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
     const u32 count = static_cast<u32>(stage.images.size());
     if (!prepared || count == 0 || count > TextureSet::MaxImages ||
-        Gow3Toggle::Disabled(Gow3Toggle::TextureSetMemo) || FrameCapture::Active()) {
+        DcpToggle::Disabled(DcpToggle::TextureSetMemo) || FrameCapture::Active()) {
         return false;
     }
     for (const auto& image : stage.images) {
@@ -2645,14 +2371,13 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         const auto& image = texture_cache.GetImage(entry.id);
         // Proxy entries need a current proxy; native entries of a proxied image go through
         // BindTextures, which may sample the proxy instead.
-        const bool proxies_on = !Gow3Toggle::Disabled(Gow3Toggle::SampleSceneProxies);
+        const bool proxies_on = !DcpToggle::Disabled(DcpToggle::SampleSceneProxies);
         if (image.backing != entry.backing || image.binding.needs_rebind ||
             image.binding.is_target || !texture_cache.IsUpToDate(entry.id) ||
             (entry.proxy ? !proxies_on ||
                                !scene_targets->ProxyCurrent(image, entry.range.base.level,
                                                             entry.range.extent.levels)
-                         : image.scene_proxy && proxies_on) ||
-            (upscaler->Enabled() && upscaler->RedirectsSampled(entry.id))) {
+                         : image.scene_proxy && proxies_on)) {
             ++texture_set_why[2];
             ++texture_set_misses;
             set.generation = ~0ull;
@@ -2690,9 +2415,9 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
-    // gow3: RenderStateMemo (see BeginMemo).
-    const bool memo_on = !Gow3Toggle::Disabled(Gow3Toggle::RenderStateMemo) && !FrameCapture::Active();
-    if (Gow3Stats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
+    // dcp: RenderStateMemo (see BeginMemo).
+    const bool memo_on = !DcpToggle::Disabled(DcpToggle::RenderStateMemo) && !FrameCapture::Active();
+    if (DcpStats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
         std::printf("Render state memo: %llu hits, %llu misses; texture sets: %llu hits, %llu "
                     "misses\n",
                     static_cast<unsigned long long>(begin_memo_hits),
@@ -2752,32 +2477,16 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
-    using VulkanUpscalerTarget = TemporalUpscaler::Target;
-    VulkanUpscalerTarget redirect{};
-    bool color_redirected = false, depth_redirected = false;
-    std::pair<u32, u32> guest_extent{1, 1};
-    std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
     if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
-    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
-    // GOW3_SCENE_DEBUG=<file>: once the file exists, why the passes of one frame keep the
-    // native size (see NoteFrameStart).
-    const bool debug_pass = scene_debug_frame && scene_started;
-    std::string why;
-    if (debug_pass) {
-        why = fmt::format("pass vs {:08x} ps {:08x} mrt {:#x} samples {} raster_scaling {}:",
-                          pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
-                          key.mrt_mask ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash
-                                       : 0,
-                          key.mrt_mask, u32(key.num_samples), upscaler->RasterScaling());
-    }
+    bool reduced = scene_started && scene_targets->Reduced() && key.num_samples == 1;
     // Only this pass's attachments: slots past the mask's width keep earlier passes' targets,
     // often the G-buffer images the lighting passes sample (bound), which kept those native.
-    const u32 num_attachments = Gow3Toggle::Disabled(Gow3Toggle::SceneAttachmentsOnly)
+    const u32 num_attachments = DcpToggle::Disabled(DcpToggle::SceneAttachmentsOnly)
                                     ? u32(cb_descs.size())
                                     : u32(std::bit_width(key.mrt_mask));
     // All attachments of a reduced pass share one proxy size (scene or half resolution).
@@ -2795,33 +2504,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             if (!scene_targets->Eligible(image) || image.binding.is_bound ||
                 image.binding.needs_rebind || desc.view_info.range.base.layer ||
                 !same_size(image, desc.view_info.range.base.level)) reduced = false;
-            if (debug_pass) {
-                why += fmt::format(" [{} {}x{} eligible {} bound {} rebind {} level {} layer {}]",
-                                   vk::to_string(image.info.pixel_format), image.info.size.width,
-                                   image.info.size.height, scene_targets->Eligible(image),
-                                   u32(image.binding.is_bound), u32(image.binding.needs_rebind),
-                                   desc.view_info.range.base.level,
-                                   desc.view_info.range.base.layer);
-            }
         }
     }
     if (db_desc.first && (!scene_targets->Eligible(texture_cache.GetImage(db_desc.first)) ||
                           !same_size(texture_cache.GetImage(db_desc.first), 0))) {
         reduced = false;
     }
-    if (debug_pass) {
-        if (db_desc.first) {
-            const auto& depth = texture_cache.GetImage(db_desc.first);
-            why += fmt::format(" depth [{} {}x{} eligible {}]",
-                               vk::to_string(depth.info.pixel_format), depth.info.size.width,
-                               depth.info.size.height, scene_targets->Eligible(depth));
-        }
-        std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
-    }
     push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
-    if (Gow3Stats::enabled) {
-        Gow3Stats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
-        Gow3Stats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
+    if (DcpStats::enabled) {
+        DcpStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
+        DcpStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
     }
     RenderState state;
     state.width = instance.GetMaxFramebufferWidth();
@@ -2891,15 +2583,6 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             attachment.image_layout = target.layout;
         }
         image->usage.render_target = 1u;
-        if (cb == 0 && upscaler->Enabled()) {
-            color_redirected = upscaler->RedirectColor(image_id, desc.view_info, redirect);
-            if (color_redirected) {
-                guest_extent = {image->info.size.width, image->info.size.height};
-                original_color = {attachment.image_view, attachment.image_layout};
-                attachment.image_view = redirect.view;
-                attachment.image_layout = redirect.layout;
-            }
-        }
     }
     for (u32 cb = state.num_color_attachments; cb < state.color_attachments.size(); ++cb) {
         state.color_attachments[cb] = {};
@@ -2965,75 +2648,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             attachment.image_layout = target.layout;
         }
         image.usage.depth_target = true;
-        if (upscaler->Enabled()) {
-            VulkanUpscalerTarget depth_redirect;
-            depth_redirected = upscaler->RedirectDepth(image_id, depth_redirect);
-            if (depth_redirected) {
-                guest_extent = {image.info.size.width, image.info.size.height};
-                attachment.image_view = depth_redirect.view;
-                attachment.image_layout = depth_redirect.layout;
-                redirect = depth_redirect;
-            }
-        }
     } else {
         state.depth_stencil_attachment = {};
     }
 
-    // gow3: a pass drawn into the upscaler's output-size images (UI, display pass): every
-    // attachment must be redirected, viewports and scissors are scaled.
     target_scale = {1.0f, 1.0f};
-    if (color_redirected || depth_redirected) {
-        u32 color_targets = 0;
-        for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
-            color_targets += state.color_attachments[cb].image_view ? 1 : 0;
-        }
-        const bool has_depth = bool(db_desc.first);
-        if ((color_targets > 0 && !color_redirected) || (has_depth && !depth_redirected) ||
-            color_targets > 1) {
-            static u32 warned = 0;
-            if (warned < 8) {
-                ++warned;
-                const auto describe = [&](VideoCore::ImageId id) {
-                    if (!id) {
-                        return std::string{"-"};
-                    }
-                    const auto& info = texture_cache.GetImage(id).info;
-                    return fmt::format("{:#x} {}x{} {}", info.guest_address, info.size.width,
-                                       info.size.height, vk::to_string(info.pixel_format));
-                };
-                std::printf("Upscaler: pass not redirected (color %s: %s, depth %s: %s, %u "
-                            "targets)\n",
-                            color_redirected ? "yes" : "no", describe(cb_descs[0].first).c_str(),
-                            depth_redirected ? "yes" : "no", describe(db_desc.first).c_str(),
-                            state.num_color_attachments);
-            }
-            if (color_redirected) {
-                state.color_attachments[0].image_view = original_color.first;
-                state.color_attachments[0].image_layout = original_color.second;
-            }
-            if (depth_redirected) {
-                auto& depth_image = texture_cache.GetImage(db_desc.first);
-                state.depth_stencil_attachment.image_view =
-                    *texture_cache.FindDepthTarget(db_desc.first, db_desc.second).image_view;
-                state.depth_stencil_attachment.image_layout = depth_image.backing->state.layout;
-            }
-        } else {
-            state.width = redirect.width;
-            state.height = redirect.height;
-            // The UI movie viewport is now 1920x1080 even when the scene is 960x540.
-            // A native viewport (or native window-space UI vertices) must not be doubled
-            // again. The final display copy still uses the guest render-size coordinates.
-            const auto& viewport = regs.viewports[0];
-            const bool native_coordinates = redirect.native_ui &&
-                (UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2) ||
-                 (regs.IsClipDisabled() && !regs.viewport_control.xscale_enable &&
-                  !regs.viewport_control.yscale_enable));
-            target_scale = UiComposition::Scale(guest_extent.first, guest_extent.second,
-                                                redirect.width, redirect.height,
-                                                native_coordinates);
-        }
-    }
-
     if (state.num_layers == std::numeric_limits<u16>::max()) {
         state.num_layers = 1;
     }
@@ -3056,10 +2675,6 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
-    }
-    // gow3: object motion vector attachment of G-buffer pipelines.
-    if (key.motion_vectors) {
-        object_motion->Attach(state, state.width, state.height);
     }
     return state;
 }
@@ -3341,10 +2956,8 @@ void Rasterizer::UpdateViewportScissorState() const {
             const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
             const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
 
-            // gow3: sub-pixel jitter of scene geometry for the temporal upscaler; the same
-            // shift as jittering the projection.
-            viewport.x = (xoffset - xscale) * target_scale[0] + draw_jitter[0];
-            viewport.y = (yoffset - yscale) * target_scale[1] + draw_jitter[1];
+            viewport.x = (xoffset - xscale) * target_scale[0];
+            viewport.y = (yoffset - yscale) * target_scale[1];
             viewport.width = xscale * 2.0f * target_scale[0];
             viewport.height = yscale * 2.0f * target_scale[1];
         }
@@ -3405,11 +3018,7 @@ void Rasterizer::UpdateViewportScissorState() const {
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
     const vk::Pipeline square = pipeline.SquarePassHandle();
-    static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_SQUARE_PASS");
-        return !env || env[0] != '0';
-    }();
-    if (!square || !enabled) [[likely]] {
+    if (!square) [[likely]] {
         return {};
     }
     // MIN(s * s, d * d) = MIN(s, d)^2: the second draw needs the first one's coverage, which a
@@ -3658,43 +3267,6 @@ void Rasterizer::MarkPass(const GraphicsPipeline* pipeline, const RenderState& s
                                          : std::string{"-"},
                            vs.pgm_hash, ps ? ps->pgm_hash : 0);
     });
-}
-
-void Rasterizer::NoteFrameStart() {
-    if (auto* profiler = GpuProfiler::Get()) {
-        profiler->BeginFrame();
-    }
-    const u64 frame = Gow3Stats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
-    // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
-    // starts a frame — the lag that decides whether guest memory can be read in place.
-    static const bool stats = [] {
-        const char* value = std::getenv("GOW3_BUFFER_STATS");
-        return value && value[0] == '1';
-    }();
-    if (!stats) {
-        return;
-    }
-    static std::array<u64, 16> frame_ticks{};
-    static std::array<u64, 17> lag_histogram{};
-    u32 lag = 0;
-    for (u32 back = 1; back < frame_ticks.size() && back < frame; ++back) {
-        const u64 tick = frame_ticks[(frame - back) % frame_ticks.size()];
-        if (tick && !scheduler.IsFree(tick)) {
-            lag = back;
-        }
-    }
-    ++lag_histogram[lag];
-    frame_ticks[frame % frame_ticks.size()] = scheduler.CurrentTick();
-    if (frame % 600 == 0) {
-        std::printf("GPU lag at frame start (frames not finished: count):");
-        for (u32 i = 0; i < lag_histogram.size(); ++i) {
-            if (lag_histogram[i]) {
-                std::printf(" %u:%llu", i, static_cast<unsigned long long>(lag_histogram[i]));
-            }
-        }
-        std::printf("\n");
-        lag_histogram = {};
-    }
 }
 
 } // namespace Vulkan

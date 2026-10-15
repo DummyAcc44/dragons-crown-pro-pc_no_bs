@@ -1,6 +1,8 @@
 #include "settings.h"
 
+#include <algorithm>
 #include <fstream>
+#include <initializer_list>
 #include <system_error>
 #include <utility>
 
@@ -48,6 +50,23 @@ std::span<const ManagedSetting> ManagedSettings() {
     return kManagedSettings;
 }
 
+bool IsValidSetting(std::string_view key, std::string_view value) {
+    const auto one_of = [&](std::initializer_list<std::string_view> values) {
+        return std::find(values.begin(), values.end(), value) != values.end();
+    };
+    if (key == kDisplayModeKey) {
+        return one_of({"windowed", "borderless"});
+    }
+    if (key == kAnisotropyKey) {
+        return one_of({"0", "2", "4", "8", "16"});
+    }
+    if (key == kRenderResolutionKey) {
+        return std::any_of(std::begin(dcp_resolutions), std::end(dcp_resolutions),
+                           [&](const DcpResolution& resolution) { return value == resolution.key; });
+    }
+    return true;
+}
+
 bool IsLauncherPlacementSetting(std::string_view key) {
     for (const std::string_view placement_key : kPlacementKeys) {
         if (placement_key == key) {
@@ -71,11 +90,10 @@ LauncherSettings::LauncherSettings(std::filesystem::path file) : file_(std::move
 
 std::string LauncherSettings::Get(std::string_view key, std::string_view def) const {
     const auto it = pending_.find(key);
-    if (it == pending_.end() || it->second.empty()) {
+    if (it == pending_.end() || it->second.empty() || !IsValidSetting(key, it->second)) {
         return std::string(def);
     }
-    // Exclusive fullscreen belongs to the in-game menu; the launcher offers Windowed and Borderless Fullscreen.
-    return key == kDisplayModeKey && it->second == "fullscreen" ? std::string("borderless") : it->second;
+    return it->second;
 }
 
 void LauncherSettings::Set(std::string_view key, std::string value) {

@@ -819,7 +819,7 @@ void *runtime_low_map(size_t size, int prot) {
 #endif
 }
 /* ---- GPU library interface (the video core registers its page hooks here) ---- */
-/* Video core optimizations switched off for diagnostics (gpu/shim/gow3_toggles.h); 0: all on. */
+/* Video core optimizations switched off for diagnostics (gpu/shim/dcp_toggles.h); 0: all on. */
 uint64_t runtime_disabled_optimizations;
 /* Speculative readers of guest memory (GPU draw-preparation workers) register a recovery
  * point: a fault on that thread jumps back to it instead of terminating (loader.c). */

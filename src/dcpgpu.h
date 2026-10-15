@@ -8,7 +8,8 @@ extern "C" {
 typedef struct {
     const char *title;          /* window title */
     const char *serial;         /* CUSA id, names the pipeline cache */
-    const char *user_dir;       /* pipeline cache/logs directory */
+    const char *user_dir;       /* user folder: the pipeline cache lives in its cache folder */
+    const char *settings_file;  /* dcp.ini */
     uint32_t sdk_version;       /* from the eboot's procparam */
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */

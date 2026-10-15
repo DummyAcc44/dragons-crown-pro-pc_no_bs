@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// gow3: frame analyzer. Creating the file named by GOW3_CAPTURE_TRIGGER records the next full
-// frame: every render pass (targets, depth, draw count, shaders, sampled textures) and compute
-// dispatch, in order, plus the buffer that was presented. Input for placing a temporal
-// upscaler (scene color, depth, motion vectors, UI) in the game's frame.
+// Frame analyzer (developer diagnostic). Creating the file named by DCP_CAPTURE_TRIGGER records the
+// next full frame: every render pass (targets, depth, draw count, shaders, sampled textures) and
+// compute dispatch, in order, plus the buffer that was presented.
 
 #pragma once
 
@@ -45,17 +44,11 @@ public:
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
     static void Note(const char* text);
 
-    /// In-game menu: records the next full frame (as the trigger file does).
-    static void Request();
-    /// What the last request did, for the menu: empty, "Capturing...", the file or an error.
-    static std::string LastResult();
-
 private:
     enum : u32 { Idle, Armed, Recording };
     static inline std::atomic<u32> state{Idle};
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};
-    static inline std::atomic<bool> requested{false};
 };
 
 } // namespace Vulkan

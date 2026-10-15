@@ -1,55 +1,44 @@
-// gow3: shadPS4 settings used by the video core, read once from GOW3_* environment
-// variables (defaults match shadPS4 except the pipeline cache, which is on).
+// shadPS4's emulator settings as the video core uses them: fixed for Dragon's Crown Pro. Only developer
+// diagnostics that do not change the rendering are read from the environment (docs/GRAPHICS.md).
 #pragma once
-#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include "common/types.h"
-
-u32 Gow3DisplayRefreshHz(); // gow3gpu.cpp: primary display refresh rate, 60 when unknown
 
 enum GpuReadbacksMode : int { Disabled, Relaxed, Precise };
 
 class EmulatorSettingsImpl {
 public:
     static EmulatorSettingsImpl* GetInstance() { static EmulatorSettingsImpl s; return &s; }
-    static bool Flag(const char* name, bool fallback) {
+    static bool Flag(const char* name) {
         const char* v = std::getenv(name);
-        return v ? (v[0] == '1' || v[0] == 'y' || v[0] == 't') : fallback;
+        return v && v[0] == '1';
     }
-    static long Number(const char* name, long fallback) {
-        const char* v = std::getenv(name);
-        return v ? std::strtol(v, nullptr, 10) : fallback;
-    }
-    s32 GetGpuId() { static const auto value = s32(Number("GOW3_GPU_ID", -1)); return value; }
-    u32 GetInternalScreenWidth() { static const auto value = u32(Number("GOW3_INTERNAL_WIDTH", 1920)); return value; }
-    u32 GetInternalScreenHeight() { static const auto value = u32(Number("GOW3_INTERNAL_HEIGHT", 1080)); return value; }
-    std::string GetPresentMode() { const char* v = std::getenv("GOW3_PRESENT_MODE"); return v ? v : "Mailbox"; }
-    // gow3: Relaxed by default: without readbacks FaceGen reads stale GPU-written vertices
-    // (vertex explosions); in the test scene it costs no measurable frame rate.
-    u32 GetReadbacksMode() { static const auto value = u32(Number("GOW3_READBACKS", GpuReadbacksMode::Relaxed)); return value; }
-    // Dragon's Crown runs at its own 60 Hz; the environment cannot change it.
+    s32 GetGpuId() { return -1; }
+    u32 GetInternalScreenWidth() { return 1920; }
+    u32 GetInternalScreenHeight() { return 1080; }
+    u32 GetReadbacksMode() { return GpuReadbacksMode::Relaxed; }
     u32 GetVblankFrequency() { return 60; }
-    /// Frames per second the present thread lets through; always 0 (no limit) for Dragon's Crown.
     u32 GetFrameLimit() { return 0; }
-    bool IsCopyGpuBuffers() { static const auto value = Flag("GOW3_COPY_GPU_BUFFERS", false); return value; }
-    bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("GOW3_DIRECT_MEMORY_ACCESS", false); return value; }
-    bool IsDumpShaders() { static const auto value = Flag("GOW3_DUMP_SHADERS", false); return value; }
-    bool IsHdrAllowed() { static const auto value = Flag("GOW3_HDR", false); return value; }
-    bool IsNullGPU() { static const auto value = Flag("GOW3_NULL_GPU", false); return value; }
+    bool IsCopyGpuBuffers() { return false; }
+    bool IsDirectMemoryAccessEnabled() { return false; }
+    bool IsDumpShaders() { static const bool value = Flag("DCP_DUMP_SHADERS"); return value; }
+    bool IsHdrAllowed() { return false; }
+    bool IsNullGPU() { return false; }
     bool IsPatchShaders() { return false; }
     bool IsPipelineCacheArchived() { return false; }
-    bool IsPipelineCacheEnabled() { static const auto value = Flag("GOW3_PIPELINE_CACHE", true); return value; }
-    bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("GOW3_READBACK_LINEAR", false); return value; }
+    bool IsPipelineCacheEnabled() { return true; }
+    // Linear images the GPU wrote are copied back for the CPU: without it some surfaces stay black.
+    bool IsReadbackLinearImagesEnabled() { return true; }
     bool IsRenderdocEnabled() { return false; }
     bool IsShaderCollect() { return false; }
     bool IsUserfaultfdTracking() { return false; }
     bool IsVkCrashDiagnosticEnabled() { return false; }
-    bool IsVkGuestMarkersEnabled() { static const auto value = Flag("GOW3_VK_MARKERS", false); return value; }
-    bool IsVkHostMarkersEnabled() { static const auto value = Flag("GOW3_VK_MARKERS", false); return value; }
+    bool IsVkGuestMarkersEnabled() { static const bool value = Flag("DCP_VK_MARKERS"); return value; }
+    bool IsVkHostMarkersEnabled() { static const bool value = Flag("DCP_VK_MARKERS"); return value; }
     bool IsVkValidationCoreEnabled() { return true; }
-    bool IsVkValidationEnabled() { static const auto value = Flag("GOW3_VK_VALIDATION", false); return value; }
+    bool IsVkValidationEnabled() { static const bool value = Flag("DCP_VK_VALIDATION"); return value; }
     bool IsVkValidationGpuEnabled() { return false; }
-    bool IsVkValidationSyncEnabled() { static const auto value = Flag("GOW3_VK_VALIDATION_SYNC", false); return value; }
+    bool IsVkValidationSyncEnabled() { static const bool value = Flag("DCP_VK_VALIDATION_SYNC"); return value; }
 };
 #define EmulatorSettings (*EmulatorSettingsImpl::GetInstance())

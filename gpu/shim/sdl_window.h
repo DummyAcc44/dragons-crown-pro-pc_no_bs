@@ -1,5 +1,4 @@
-// gow3: the game window. Created by the VideoOut driver on first open; the
-// event pump runs on the port's window thread (see window.cpp).
+// The game window. It is created, and its events are pumped, on the window thread (dcpgpu.cpp).
 #pragma once
 #include <atomic>
 #include <chrono>
@@ -41,7 +40,7 @@ private:
     std::atomic<bool> is_open{true};
     std::mutex text_mutex;
     bool text_requested{}, text_active{};
-    int display_mode = -1; ///< applied Gow3Settings display mode (window thread)
+    int display_mode = -1; ///< applied DcpSettings display mode (window thread)
     void ApplyDisplayMode(int mode);
     void ToggleBorderless();
     void UpdateFpsTitle();

@@ -1,4 +1,4 @@
-// gow3: shadPS4 registers HLE functions with LIB_FUNCTION(nid, library,
+// dcp: shadPS4 registers HLE functions with LIB_FUNCTION(nid, library,
 // version, module, fn). Here the registrations fill a table that the C
 // loader queries by NID (see dcpgpu.cpp: dcpgpu_resolve).
 #pragma once

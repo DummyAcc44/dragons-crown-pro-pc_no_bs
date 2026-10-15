@@ -15,9 +15,8 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
-#include "gow3_toggles.h"
-#include "gow3_settings.h"
-#include "gow3_overlay.h"
+#include "dcp_toggles.h"
+#include "dcp_overlay.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -37,11 +36,11 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Vulkan {
-extern std::atomic<u64> g_gow3_compile_ns;
-extern std::atomic<u32> g_gow3_compiles;
-extern std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
-extern std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
-extern std::atomic<u32> g_gow3_pending_draws;
+extern std::atomic<u64> g_dcp_compile_ns;
+extern std::atomic<u32> g_dcp_compiles;
+extern std::atomic<u64> g_dcp_capture_ns, g_dcp_async_ns, g_dcp_compile_wait_ns;
+extern std::atomic<u64> g_dcp_snapshot_ns, g_dcp_guest_wait_ns;
+extern std::atomic<u32> g_dcp_pending_draws;
 } // namespace Vulkan
 
 namespace Libraries::VideoOut {
@@ -78,19 +77,11 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
     if (EmulatorSettings.GetVblankFrequency() >= 120) {
         main_port.resolution.refresh_rate = SCE_VIDEO_OUT_REFRESH_RATE_119_88HZ;
     }
-    const char* separate = std::getenv("GOW3_PRESENT_THREAD");
-    separate_swap = !(separate && separate[0] == '0');
-    if (separate_swap) {
-        swap_thread = std::jthread([&](std::stop_token token) { SwapThread(token); });
-    }
+    swap_thread = std::jthread([&](std::stop_token token) { SwapThread(token); });
     present_thread = std::jthread([&](std::stop_token token) { PresentThread(token); });
 }
 
 void VideoOutDriver::RunPresenter(std::function<void()> work, bool if_idle) {
-    if (!separate_swap) {
-        work();
-        return;
-    }
     {
         std::scoped_lock lock{swap_mutex};
         if (if_idle && (swap_busy || !swap_queue.empty())) {
@@ -102,7 +93,7 @@ void VideoOutDriver::RunPresenter(std::function<void()> work, bool if_idle) {
 }
 
 void VideoOutDriver::SwapThread(std::stop_token token) {
-    Common::SetCurrentThreadName("gow3:Present");
+    Common::SetCurrentThreadName("dcp:present");
     while (true) {
         std::function<void()> work;
         {
@@ -305,64 +296,8 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
-// [DEBUG_SAULO][Flicker]: odd flips (no buffer, or an interval outside 8-34 ms); 5 lines in the
-// first 5 s, then 60 more. All are counted.
-static void LogOddFlip(s32 index, VAddr address) {
-    using Clock = std::chrono::steady_clock;
-    static const auto start = Clock::now();
-    static auto last = start;
-    static u64 flips, odd_flips;
-    static u32 early_logged, late_logged;
-    static const struct Summary {
-        ~Summary() {
-            std::printf("[DEBUG_SAULO][Flicker] total_odd_flips=%llu logged=%u\n",
-                        static_cast<unsigned long long>(odd_flips), early_logged + late_logged);
-        }
-    } summary;
-    const auto now = Clock::now();
-    const double gap_ms = std::chrono::duration<double, std::milli>(now - last).count();
-    const auto time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-    last = now;
-    ++flips;
-    struct Entry {
-        s64 time_ms;
-        u64 flip;
-        s32 index;
-        VAddr address;
-        double gap_ms;
-    };
-    static std::array<Entry, 4> recent{};
-    const Entry entry{time_ms, flips, index, address, gap_ms};
-    const auto history = recent;
-    std::copy(recent.begin() + 1, recent.end(), recent.begin());
-    recent.back() = entry;
-    if (!(index < 0 || (flips > 1 && (gap_ms < 8.0 || gap_ms > 34.0)))) {
-        return;
-    }
-    ++odd_flips;
-    u32& logged = time_ms < 5000 ? early_logged : late_logged;
-    if (logged < (time_ms < 5000 ? 5u : 60u)) {
-        ++logged;
-        LOG_WARNING(Lib_VideoOut,
-                    "[DEBUG_SAULO][Flicker] time_ms={} flip={} index={} address={:#x} gap_ms={:.1f} total={}",
-                    time_ms, flips, index, address, gap_ms, odd_flips);
-        for (size_t i = 0; i < history.size(); ++i) {
-            const Entry& e = history[i];
-            if (e.flip == 0) {
-                continue;
-            }
-            LOG_WARNING(Lib_VideoOut,
-                        "[DEBUG_SAULO][FlickerContext] odd={} back={} time_ms={} flip={} index={} "
-                        "address={:#x} gap_ms={:.1f} same_as_next={}",
-                        odd_flips, history.size() - i, e.time_ms, e.flip, e.index, e.address, e.gap_ms,
-                        (i + 1 < history.size() ? history[i + 1].address : address) == e.address);
-        }
-    }
-}
-
 void VideoOutDriver::Flip(const Request& req) {
-    LogOddFlip(req.index, req.index >= 0 ? req.port->buffer_slots[req.index].address_left : 0);
-    // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
+    // Update HDR status before presenting, then present the frame on the swap thread.
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
         presenter->Present(frame);
@@ -370,8 +305,8 @@ void VideoOutDriver::Flip(const Request& req) {
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
 
-    // gow3: GOW3_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
-    static const bool frame_stats = EmulatorSettingsImpl::Flag("GOW3_FRAME_STATS", false);
+    // DCP_FRAME_STATS=1: flip rate, frame time spread and stall causes, every 5 seconds.
+    static const bool frame_stats = DcpStats::enabled;
     if (frame_stats) {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point window_start = Clock::now(), last = window_start;
@@ -386,16 +321,16 @@ void VideoOutDriver::Flip(const Request& req) {
         // Stall diagnostics: what happened during a long frame.
         static u64 last_gpu_ns, last_images, last_image_bytes, last_buffer_bytes;
         static u64 last_t[6], last_minflt, last_sigf, last_pc, last_pp, last_rc, last_rp;
-        const u64 pc = Gow3Stats::protect_calls.load(), pp = Gow3Stats::protect_pages.load(),
-                  rc = Gow3Stats::protect_revoke_calls.load(), rp = Gow3Stats::protect_revoke_pages.load();
-        const u64 minflt = Gow3Stats::gpu_minor_faults.load(), sigf = Gow3Stats::gpu_signal_faults.load();
+        const u64 pc = DcpStats::protect_calls.load(), pp = DcpStats::protect_pages.load(),
+                  rc = DcpStats::protect_revoke_calls.load(), rp = DcpStats::protect_revoke_pages.load();
+        const u64 minflt = DcpStats::gpu_minor_faults.load(), sigf = DcpStats::gpu_signal_faults.load();
         static u64 last_copy_cpu, last_copy_sys, last_copy_flt;
-        const u64 copy_cpu = Gow3Stats::t_copy_cpu.load(), copy_sys = Gow3Stats::copy_sys_us.load(),
-                  copy_flt = Gow3Stats::copy_minflt.load();
+        const u64 copy_cpu = DcpStats::t_copy_cpu.load(), copy_sys = DcpStats::copy_sys_us.load(),
+                  copy_flt = DcpStats::copy_minflt.load();
         static u64 last_proc_flt, last_copy_ns, last_copy_bytes, last_rf, last_trf, last_twf;
-        const u64 rf = Gow3Stats::read_faults.load(), trf = Gow3Stats::t_read_faults.load(),
-                  twf = Gow3Stats::t_write_faults.load();
-        // gow3: every frame over 40 ms after the first, at most 10 per 5 s window.
+        const u64 rf = DcpStats::read_faults.load(), trf = DcpStats::t_read_faults.load(),
+                  twf = DcpStats::t_write_faults.load();
+        // Every frame over 40 ms after the first, at most 10 per 5 s window.
         static bool primed = false;
         static u32 stalls_shown = 0;
         const bool stall = primed && frame_ms > 40.0 && stalls_shown < 10;
@@ -404,10 +339,10 @@ void VideoOutDriver::Flip(const Request& req) {
         // Waits and work inside the long frame (window counters are reset every 5 s, so the
         // previous values are reset with them).
         static u64 last_wait[7];
-        const u64 wait_now[7] = {Gow3Stats::t_readback_wait.load(), Gow3Stats::tick_wait_ns.load(),
-                                 Gow3Stats::sync_recording_ns.load(), Gow3Stats::host_copies_wait_ns.load(),
-                                 u64(Vulkan::g_gow3_compile_ns.load()), u64(Vulkan::g_gow3_compiles.load()),
-                                 Gow3Stats::t_gc.load()};
+        const u64 wait_now[7] = {DcpStats::t_readback_wait.load(), DcpStats::tick_wait_ns.load(),
+                                 DcpStats::sync_recording_ns.load(), DcpStats::host_copies_wait_ns.load(),
+                                 u64(Vulkan::g_dcp_compile_ns.load()), u64(Vulkan::g_dcp_compiles.load()),
+                                 DcpStats::t_gc.load()};
         if (stall) {
             std::printf("Stall: %.1f ms frame; waits: readback %.1f ms, GPU ticks %.1f ms, "
                         "recorder %.1f ms, host copies %.1f ms; %llu compiles %.1f ms; GC %.1f ms\n",
@@ -425,27 +360,27 @@ void VideoOutDriver::Flip(const Request& req) {
         last_rf = rf;
         last_trf = trf;
         last_twf = twf;
-        const u64 copy_ns = Gow3Stats::t_copy.load(), copy_bytes = Gow3Stats::copy_bytes.load();
+        const u64 copy_ns = DcpStats::t_copy.load(), copy_bytes = DcpStats::copy_bytes.load();
         u64 proc_flt = 0;
 #ifndef _WIN32
         if (rusage usage{}; getrusage(RUSAGE_SELF, &usage) == 0) {
             proc_flt = usage.ru_minflt;
         }
 #endif
-        const u64 t_now[6] = {Gow3Stats::t_resident.load(), Gow3Stats::t_protect.load(),
-                              Gow3Stats::t_image_create.load(), Gow3Stats::t_refresh.load(),
-                              Gow3Stats::t_staging.load(), Gow3Stats::t_host_wait.load()};
+        const u64 t_now[6] = {DcpStats::t_resident.load(), DcpStats::t_protect.load(),
+                              DcpStats::t_image_create.load(), DcpStats::t_refresh.load(),
+                              DcpStats::t_staging.load(), DcpStats::t_host_wait.load()};
         static u64 last_draws, last_dispatches, last_subs, last_sys, last_user, last_invol, last_vol;
-        const u64 draws = Gow3Stats::draws.load(), dispatches = Gow3Stats::dispatches.load(),
-                  subs = Gow3Stats::submissions.load(), sys_us = Gow3Stats::gpu_sys_us.load(),
-                  user_us = Gow3Stats::gpu_user_us.load(), invol = Gow3Stats::gpu_invol_switches.load(),
-                  vol = Gow3Stats::gpu_vol_switches.load();
+        const u64 draws = DcpStats::draws.load(), dispatches = DcpStats::dispatches.load(),
+                  subs = DcpStats::submissions.load(), sys_us = DcpStats::gpu_sys_us.load(),
+                  user_us = DcpStats::gpu_user_us.load(), invol = DcpStats::gpu_invol_switches.load(),
+                  vol = DcpStats::gpu_vol_switches.load();
         u64 gpu_ns = 0;
 #ifdef _WIN32
-        // gow3: Windows has no per-thread clock id; the thread's user + kernel time instead.
+        // Windows has no per-thread clock id; the thread's user + kernel time instead.
         static HANDLE gpu_thread = nullptr;
         if (!gpu_thread) {
-            if (const unsigned long id = Gow3Stats::gpu_thread_id.load()) {
+            if (const unsigned long id = DcpStats::gpu_thread_id.load()) {
                 gpu_thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, id);
             }
         }
@@ -457,15 +392,15 @@ void VideoOutDriver::Flip(const Request& req) {
             gpu_ns = ns(kernel) + ns(user);
         }
 #else
-        if (const int clock = Gow3Stats::gpu_thread_clock.load(); clock != -1) {
+        if (const int clock = DcpStats::gpu_thread_clock.load(); clock != -1) {
             timespec ts{};
             clock_gettime(static_cast<clockid_t>(clock), &ts);
             gpu_ns = u64(ts.tv_sec) * 1000000000ull + u64(ts.tv_nsec);
         }
 #endif
-        const u64 images = Gow3Stats::images_registered.load();
-        const u64 image_bytes = Gow3Stats::image_upload_bytes.load();
-        const u64 buffer_bytes = Gow3Stats::buffer_upload_bytes.load();
+        const u64 images = DcpStats::images_registered.load();
+        const u64 image_bytes = DcpStats::image_upload_bytes.load();
+        const u64 buffer_bytes = DcpStats::buffer_upload_bytes.load();
         if (stall) {
             std::printf("       GPU thread on CPU %.1f ms; %llu images registered, "
                         "%.1f MB image uploads, %.1f MB buffer uploads\n",
@@ -532,21 +467,21 @@ void VideoOutDriver::Flip(const Request& req) {
         ++frames;
         const double window = std::chrono::duration<double>(now - window_start).count();
         if (window >= 5.0) {
-            const u32 compiles = Vulkan::g_gow3_compiles.exchange(0);
-            const u64 compile_ns = Vulkan::g_gow3_compile_ns.exchange(0);
-            const double capture_ms = Vulkan::g_gow3_capture_ns.exchange(0) / 1e6;
-            const double async_ms = Vulkan::g_gow3_async_ns.exchange(0) / 1e6;
-            const double wait_ms = Vulkan::g_gow3_compile_wait_ns.exchange(0) / 1e6;
-            const double snapshot_ms = Vulkan::g_gow3_snapshot_ns.exchange(0) / 1e6;
-            const double guest_wait_ms = Vulkan::g_gow3_guest_wait_ns.exchange(0) / 1e6;
-            const u32 pending_draws = Vulkan::g_gow3_pending_draws.exchange(0);
+            const u32 compiles = Vulkan::g_dcp_compiles.exchange(0);
+            const u64 compile_ns = Vulkan::g_dcp_compile_ns.exchange(0);
+            const double capture_ms = Vulkan::g_dcp_capture_ns.exchange(0) / 1e6;
+            const double async_ms = Vulkan::g_dcp_async_ns.exchange(0) / 1e6;
+            const double wait_ms = Vulkan::g_dcp_compile_wait_ns.exchange(0) / 1e6;
+            const double snapshot_ms = Vulkan::g_dcp_snapshot_ns.exchange(0) / 1e6;
+            const double guest_wait_ms = Vulkan::g_dcp_guest_wait_ns.exchange(0) / 1e6;
+            const u32 pending_draws = Vulkan::g_dcp_pending_draws.exchange(0);
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
-            const u64 faults = Gow3Stats::tracker_faults.exchange(0);
+            const u64 faults = DcpStats::tracker_faults.exchange(0);
             // GPU command thread CPU time per draw: comparable between builds even when the scene
             // (and so the frame rate) differs a little.
             static u64 window_draws = 0, window_gpu_us = 0;
-            const u64 all_draws = Gow3Stats::draws.load();
-            const u64 gpu_us = Gow3Stats::gpu_user_us.load() + Gow3Stats::gpu_sys_us.load();
+            const u64 all_draws = DcpStats::draws.load();
+            const u64 gpu_us = DcpStats::gpu_user_us.load() + DcpStats::gpu_sys_us.load();
             const double us_per_draw = all_draws > window_draws
                                            ? double(gpu_us - window_gpu_us) / (all_draws - window_draws)
                                            : 0.0;
@@ -557,7 +492,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%u shader/pipeline compiles, %.1f ms; async: capture %.1f ms, workers "
                         "%.1f ms, sync wait %.1f ms, snapshots %.1f ms, GPU capture wait %.1f ms, "
                         "%u pending draws; %llu recorder syncs; "
-                        "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
+                        "%.0f write faults/s; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
                         "reduced-size draws %.0f/frame of %.0f in the scene\n",
@@ -565,16 +500,15 @@ void VideoOutDriver::Flip(const Request& req) {
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
                         pending_draws,
                         static_cast<unsigned long long>(direct),
-                        faults / window, static_cast<long long>(Gow3Stats::hot_pages.load()),
-                        us_per_draw, draws_per_frame,
-                        Gow3Stats::gpu_idle_ns.exchange(0) / (window * 1e7),
-                        Gow3Stats::sync_recording_ns.exchange(0) / (window * 1e7),
-                        Gow3Stats::host_copies_wait_ns.exchange(0) / (window * 1e7),
-                        frames ? double(Gow3Stats::host_copy_waits.exchange(0)) / frames : 0.0,
-                        Gow3Stats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
-                        Gow3Stats::tick_wait_ns.exchange(0) / (window * 1e7),
-                        frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
-                        frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
+                        faults / window, us_per_draw, draws_per_frame,
+                        DcpStats::gpu_idle_ns.exchange(0) / (window * 1e7),
+                        DcpStats::sync_recording_ns.exchange(0) / (window * 1e7),
+                        DcpStats::host_copies_wait_ns.exchange(0) / (window * 1e7),
+                        frames ? double(DcpStats::host_copy_waits.exchange(0)) / frames : 0.0,
+                        DcpStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
+                        DcpStats::tick_wait_ns.exchange(0) / (window * 1e7),
+                        frames ? double(DcpStats::reduced_draws.exchange(0)) / frames : 0.0,
+                        frames ? double(DcpStats::scene_draws.exchange(0)) / frames : 0.0);
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
@@ -704,7 +638,6 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .eop = is_eop,
         });
     }
-    request_cv.notify_one();
 }
 
 void VideoOutDriver::PresentThread(std::stop_token token) {
@@ -715,19 +648,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadRealtime(vblank_period);
 
     Common::AccurateTimer timer{vblank_period};
-
-    // gow3: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
-    // until its slot; slots advance by one period (no drift) but never lag behind by more.
-    const bool fixed_limit = EmulatorSettings.GetVblankFrequency() == 480;
-    const auto current_limit = [&] {
-        return fixed_limit ? EmulatorSettings.GetFrameLimit() : u32(Gow3Settings::Get().fps_limit.load());
-    };
-    u32 frame_limit = current_limit();
-    auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
-                                    : std::chrono::nanoseconds(0);
-    auto next_flip = std::chrono::steady_clock::now();
-    std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
-                EmulatorSettings.GetVblankFrequency(), frame_limit);
+    std::printf("VideoOut: vblank %u Hz\n", EmulatorSettings.GetVblankFrequency());
 
     const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
@@ -739,20 +660,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return {};
     };
 
-    // gow3: with a frame limit (uncapped presets) a queued flip is presented as soon as it
-    // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
-    bool immediate_flips = frame_limit != 0;
-
     while (!token.stop_requested()) {
-        if (const u32 limit = current_limit(); limit != frame_limit) {
-            frame_limit = limit;
-            frame_period = limit ? std::chrono::nanoseconds(1000000000 / limit) : std::chrono::nanoseconds(0);
-            immediate_flips = limit != 0;
-            next_flip = std::chrono::steady_clock::now();
-            std::printf("VideoOut: frame limit %u FPS\n", limit);
-        }
         timer.Start();
-        const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
@@ -762,17 +671,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
-        const auto now = std::chrono::steady_clock::now();
-        const bool flip_slot = !frame_limit || now >= next_flip;
-        if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
-            if (request && frame_limit) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
-            }
             if (!request) {
-                // gow3: the save list / menu / text entry stay live while the game draws nothing.
-                static auto last_redraw = std::chrono::steady_clock::now();
-                if (main_port.is_open && Gow3Overlay::CapturesInput() &&
+                // The save list, the menu and the text entry stay live while the game draws nothing.
+                const auto now = std::chrono::steady_clock::now();
+                static auto last_redraw = now;
+                if (main_port.is_open && DcpOverlay::CapturesInput() &&
                     now - last_redraw >= std::chrono::milliseconds(16)) {
                     last_redraw = now;
                     DrawLastFrame();
@@ -813,33 +718,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             main_port.vblank_cv.notify_all();
         }
 
-        if (!immediate_flips || main_port.flip_rate != 0) {
-            timer.End();
-            continue;
-        }
-        while (!token.stop_requested()) {
-            {
-                std::unique_lock lk{mutex};
-                if (!request_cv.wait_until(lk, tick_deadline,
-                                           [&] { return !requests.empty(); })) {
-                    break; // next vblank
-                }
-            }
-            if (std::chrono::steady_clock::now() < next_flip) {
-                if (next_flip >= tick_deadline) {
-                    break;
-                }
-                std::this_thread::sleep_until(next_flip);
-            }
-            const auto now = std::chrono::steady_clock::now();
-            const auto request = receive_request();
-            if (request) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
-                Flip(request);
-                FRAME_END;
-            }
-        }
-        std::this_thread::sleep_until(tick_deadline);
+        timer.End();
     }
 }
 

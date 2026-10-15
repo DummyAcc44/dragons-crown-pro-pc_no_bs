@@ -2,6 +2,8 @@
 #ifndef DCP_LAUNCHER_H
 #define DCP_LAUNCHER_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -43,6 +45,10 @@ int dcp_render_resolution(const char *settings_file);
 /* Fills `names` with the distinct names of the Vulkan devices the renderer can use and returns how many; enumerates
  * only, no device is created. */
 int dcp_gpu_names(char (*names)[256], int max);
+
+/* Builds boot.bin, content.bin and image.json in `out` from the prepared game folder `app0` (UTF-8 paths). 0 on
+ * success; otherwise 1 and the reason in `error`. */
+int dcp_build_boot_image(const char *app0, const char *out, char *error, size_t error_size);
 
 typedef enum { DCP_LAUNCHER_PLAY = 0, DCP_LAUNCHER_QUIT = 1 } DcpLauncherResult;
 

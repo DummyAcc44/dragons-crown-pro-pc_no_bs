@@ -61,8 +61,8 @@ an update ever appears. Core scope is enough for the loader now; the CPKs are on
 |---|---|
 | `tools\setup.ps1 [-InstallPython]` | Reports Python, `cryptography`, MSYS2 CLANG64 (clang, CMake, Ninja, pkgconf, SDL3), video-core libraries (warn only), package, free disk. `-InstallPython` creates `.venv` with `cryptography` only. |
 | `tools\inspect-game.ps1 [-List]` | PKG metadata, profile check, executables/modules report once extracted. Read-only. |
-| `tools\prepare-game.ps1 [-Scope core\|full]` | Extract, build view, verify eboot hash and modules, build the boot image. |
-| `tools\build.ps1 [-Run] [-Clean]` | The normal command. Updates what is stale (GPU deps, unpacked/prepared game, boot image), configures when needed, builds incrementally, checks the outputs; `-Run` launches that binary and logs to `build\logs\dragons_crown_pro_NNN.log` (next free number). `-CheckImports` (diagnostic) lists imports the runtime lacks. |
+| `tools\prepare-game.ps1 [-Scope core\|full]` | Optional, development only: extract a fake PKG into `game\extracted\base` and build the view (Python). The launcher's Install game... unpacks the same `.pkg` natively. |
+| `tools\build.ps1 [-Run] [-Clean]` | The normal command. Updates what is stale (GPU deps, CMake configuration, the boot image of an installed game, natively), builds incrementally; `-Run` launches that binary and logs to `build\logs\dragons_crown_pro_NNN.log` (next free number). `-CheckImports` (diagnostic) lists imports the runtime lacks. |
 | `tools\run.ps1` | Wrapper for `tools\build.ps1 -Run`. |
 | `tools\clean.ps1 [-Prepared] [-Logs] [-WhatIf]` | Removes `build\`, `dist\`; optionally the link views and logs. Never touches the `.pkg`, `game\extracted` or saves. |
 | `scripts\import_inventory.py` | Import inventory, see below. |
@@ -71,7 +71,7 @@ an update ever appears. Core scope is enough for the loader now; the CPKs are on
 
 MSYS2 **CLANG64** only (found at `C:\msys64`, or `MSYS2_ROOT`): clang 22.1.7, CMake 4.3.3, Ninja, pkgconf, SDL3. Already
 installed here; nothing was installed except `cryptography` in `.venv`. For first boot the video core also needs Vulkan
-headers/loader, VMA, glslang, fmt, boost, robin-map, xxhash, ffmpeg, zydis, spirv-* (`setup.ps1` prints the `pacman` line).
+headers/loader, VMA, glslang, fmt, boost, robin-map, xxhash, libpng, zydis, spirv-* (`setup.ps1` prints the `pacman` line).
 `CMakeLists.txt` refuses non-clang compilers. Win10 1903 APIs, `--disable-high-entropy-va` and a 16 MiB committed stack are
 required by the loader.
 
@@ -91,8 +91,7 @@ Environment variables keep the runtime's names with the `DCP_` prefix (`DCP_USER
 
 `build\logs\dragons_crown_pro_NNN.log` starts with the command line, prepared root, CUSA, `APP_VER`, eboot hash prefix, entry, image size,
 SDK, module list and import counts, then everything the loader prints and `[run] exit code N`. The Windows loader already
-carries a fault reporter (registers, stack words, rbp chain with guest offsets); no minidumps. No `DEBUG_SAULO`
-diagnostics were added.
+carries a fault reporter (registers, stack words, rbp chain with guest offsets); no minidumps.
 
 ## Import inventory (`scripts\import_inventory.py`, planning only)
 
@@ -134,7 +133,7 @@ tools\build.ps1 -Run -CheckImports   # runtime's own list of imports it cannot b
 |---|---|
 | Title / version | CUSA10454, `VERSION 01.03` (`APP_VER 01.00`) |
 | Entry | `eboot.bin`, entry `0x54c690`, SDK `0x4508101` |
-| Prepared layout | `game\prepared\v1.03`; run `tools\prepare-game.ps1 -Scope full` first so `DRACRO*.CPK` are present |
+| Prepared layout | `game\prepared\v1.03`, installed by the launcher (or `tools\prepare-game.ps1 -Scope full` from a PKG) |
 | Modules | `libc.prx`, `libSceFios2.prx`, `libSceNpToolkit2.prx` linked at `0xed0000`, `0xfd0000`, `0x1160000` |
 | Loader | Maps, relocates, enters module initialisers. Stops at unresolved imports. |
 | Runtime | 324 of the 583 runtime-side imports implemented; 259 missing |
